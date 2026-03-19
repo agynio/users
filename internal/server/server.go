@@ -63,10 +63,13 @@ func (s *Server) GetUserByOIDCSubject(ctx context.Context, req *usersv1.GetUserB
 }
 
 func (s *Server) BatchGetUsers(ctx context.Context, req *usersv1.BatchGetUsersRequest) (*usersv1.BatchGetUsersResponse, error) {
-  	identityIDs := req.GetIdentityIds()
-  	if len(identityIDs) == 0 {
-  		return &usersv1.BatchGetUsersResponse{Users: nil}, nil
-  	}
+	identityIDs := req.GetIdentityIds()
+	if len(identityIDs) == 0 {
+		return &usersv1.BatchGetUsersResponse{Users: nil}, nil
+	}
+	if len(identityIDs) > 100 {
+		return nil, status.Errorf(codes.InvalidArgument, "batch size %d exceeds maximum of 100", len(identityIDs))
+	}
 
   	ids := make([]uuid.UUID, 0, len(identityIDs))
   	for i, identityID := range identityIDs {

@@ -147,6 +147,13 @@ func TestUsersServiceE2E(t *testing.T) {
 		_, err = client.BatchGetUsers(ctx, &usersv1.BatchGetUsersRequest{IdentityIds: []string{"bad"}})
 		requireStatusCode(t, err, codes.InvalidArgument)
 
+		ids := make([]string, 101)
+		for i := range ids {
+			ids[i] = uuid.NewString()
+		}
+		_, err = client.BatchGetUsers(ctx, &usersv1.BatchGetUsersRequest{IdentityIds: ids})
+		requireStatusCode(t, err, codes.InvalidArgument)
+
 		_, err = client.UpdateUser(ctx, &usersv1.UpdateUserRequest{IdentityId: uuid.NewString()})
 		requireStatusCode(t, err, codes.InvalidArgument)
 	})
