@@ -35,7 +35,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Alice",
-			Nickname:    "ally",
+			Email:       "alice@example.com",
 			PhotoUrl:    "https://example.com/photo.png",
 		})
 		require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		resolveResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Alice Updated",
-			Nickname:    "ally-2",
+			Email:       "alice-updated@example.com",
 			PhotoUrl:    "https://example.com/updated.png",
 		})
 		require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Bob",
-			Nickname:    "bobby",
+			Email:       "bob@example.com",
 			PhotoUrl:    "https://example.com/bob.png",
 		})
 		require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Charlie",
-			Nickname:    "char",
+			Email:       "charlie@example.com",
 			PhotoUrl:    "https://example.com/charlie.png",
 		})
 		require.NoError(t, err)
@@ -90,14 +90,14 @@ func TestUsersServiceE2E(t *testing.T) {
 		firstResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: firstSubject,
 			Name:        "Dana",
-			Nickname:    "d",
+			Email:       "dana@example.com",
 			PhotoUrl:    "https://example.com/dana.png",
 		})
 		require.NoError(t, err)
 		secondResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: secondSubject,
 			Name:        "Elliot",
-			Nickname:    "ell",
+			Email:       "elliot@example.com",
 			PhotoUrl:    "https://example.com/elliot.png",
 		})
 		require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Frank",
-			Nickname:    "frankie",
+			Email:       "frank@example.com",
 			PhotoUrl:    "https://example.com/frank.png",
 		})
 		require.NoError(t, err)
