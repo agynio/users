@@ -25,7 +25,7 @@ jobs:
           version: 1.66.0
 
       - name: Generate protobuf bindings
-        run: buf generate --path agynio/api/users/v1
+        run: buf generate buf.build/agynio/api --path agynio/api/users/v1
 
       - name: Run tests
         run: go test ./...
