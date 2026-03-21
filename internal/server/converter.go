@@ -23,3 +23,23 @@ func toProtoUser(user store.User) *usersv1.User {
 		PhotoUrl:    user.PhotoURL,
 	}
 }
+
+func toProtoAPIToken(token store.APIToken) *usersv1.APIToken {
+	var expiresAt *timestamppb.Timestamp
+	if token.ExpiresAt != nil {
+		expiresAt = timestamppb.New(*token.ExpiresAt)
+	}
+	var lastUsedAt *timestamppb.Timestamp
+	if token.LastUsedAt != nil {
+		lastUsedAt = timestamppb.New(*token.LastUsedAt)
+	}
+	return &usersv1.APIToken{
+		Id:          token.ID.String(),
+		IdentityId:  token.IdentityID.String(),
+		Name:        token.Name,
+		TokenPrefix: token.TokenPrefix,
+		ExpiresAt:   expiresAt,
+		CreatedAt:   timestamppb.New(token.CreatedAt),
+		LastUsedAt:  lastUsedAt,
+	}
+}
