@@ -314,15 +314,28 @@ func (s *Store) RevokeAPIToken(ctx context.Context, tokenID uuid.UUID, identityI
 
 func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken, error) {
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE user_api_tokens SET last_used_at = NOW() WHERE token_hash = $1 RETURNING %s`, apiTokenColumns),
+		fmt.Sprintf(`UPDATE user_api_tokens SET last_used_at = NOW()
+        WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
+        RETURNING %s`, apiTokenColumns),
 		tokenHash,
 	)
 	apiToken, err := scanAPIToken(row)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return APIToken{}, NotFound("api token")
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return APIToken{}, err
 		}
-		return APIToken{}, err
+
+		var expiresAt pgtype.Timestamptz
+		if err := s.pool.QueryRow(ctx, `SELECT expires_at FROM user_api_tokens WHERE token_hash = $1`, tokenHash).Scan(&expiresAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return APIToken{}, NotFound("api token")
+			}
+			return APIToken{}, err
+		}
+		if expiresAt.Valid && !expiresAt.Time.After(time.Now()) {
+			return APIToken{}, Expired("api token")
+		}
+		return APIToken{}, fmt.Errorf("api token resolve failed to update")
 	}
 	return apiToken, nil
 }

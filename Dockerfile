@@ -22,10 +22,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY buf.gen.yaml buf.yaml ./
-RUN apk add --no-cache git
-RUN buf generate https://github.com/agynio/api.git#branch=noa/issue-45,subdir=proto \
-    --template buf.gen.yaml \
-    --path agynio/api/users/v1
+RUN buf generate buf.build/agynio/api --path agynio/api/users/v1
 
 COPY . .
 

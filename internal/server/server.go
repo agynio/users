@@ -218,13 +218,6 @@ func (s *Server) ResolveAPIToken(ctx context.Context, req *usersv1.ResolveAPITok
 		return nil, toStatusError(err)
 	}
 
-	if token.ExpiresAt != nil {
-		now := time.Now()
-		if !token.ExpiresAt.After(now) {
-			return nil, status.Error(codes.Unauthenticated, "api token expired")
-		}
-	}
-
 	return &usersv1.ResolveAPITokenResponse{
 		IdentityId: token.IdentityID.String(),
 		Token:      toProtoAPIToken(token),
@@ -259,6 +252,10 @@ func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
 }
 
 func toStatusError(err error) error {
+	var expired *store.ExpiredError
+	if errors.As(err, &expired) {
+		return status.Error(codes.Unauthenticated, expired.Error())
+	}
 	var notFound *store.NotFoundError
 	if errors.As(err, &notFound) {
 		return status.Error(codes.NotFound, notFound.Error())

@@ -50,6 +50,7 @@ func Hash(plaintext string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HasPrefix reports whether the token matches the API gateway prefix.
 func HasPrefix(token string) bool {
 	return strings.HasPrefix(token, tokenPrefix)
 }

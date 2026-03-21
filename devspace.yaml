@@ -52,9 +52,7 @@ functions:
                     sleep 1; elapsed=$((elapsed + 1))
                     [ "$elapsed" -ge 120 ] && { echo "ERROR: sync timeout" >&2; exit 1; }
                   done
-                  buf generate https://github.com/agynio/api.git#branch=noa/issue-45,subdir=proto \
-                    --template buf.gen.yaml \
-                    --path agynio/api/users/v1
+                  buf generate buf.build/agynio/api --path agynio/api/users/v1
                   exec go run ./cmd/users-service
               volumeMounts:
                 - name: data
@@ -137,7 +135,7 @@ pipelines:
       exec_container \
         --label-selector "app.kubernetes.io/name=users-e2e" \
         -n ${USERS_NAMESPACE} \
-        -- bash -c 'cd /opt/app/data && buf generate https://github.com/agynio/api.git#branch=noa/issue-45,subdir=proto --template buf.gen.yaml --path agynio/api/users/v1 && go test -v -count=1 -tags e2e ./test/e2e/'
+        -- bash -c 'cd /opt/app/data && buf generate buf.build/agynio/api --path agynio/api/users/v1 && go test -v -count=1 -tags e2e ./test/e2e/'
       EXIT_CODE=$?
       stop_dev e2e-runner
       purge_deployments e2e-runner
