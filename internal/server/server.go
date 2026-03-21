@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
+	"github.com/agynio/users/internal/apitoken"
 	"github.com/agynio/users/internal/store"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -121,6 +124,113 @@ func (s *Server) UpdateUser(ctx context.Context, req *usersv1.UpdateUserRequest)
 	return &usersv1.UpdateUserResponse{User: toProtoUser(user)}, nil
 }
 
+func (s *Server) CreateAPIToken(ctx context.Context, req *usersv1.CreateAPITokenRequest) (*usersv1.CreateAPITokenResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "name must be provided")
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil {
+		if err := req.ExpiresAt.CheckValid(); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "expires_at: %v", err)
+		}
+		value := req.ExpiresAt.AsTime()
+		now := time.Now()
+		if !value.After(now) {
+			return nil, status.Error(codes.InvalidArgument, "expires_at must be in the future")
+		}
+		expiresAt = &value
+	}
+
+	generated, err := apitoken.Generate()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "generate token: %v", err)
+	}
+
+	token, err := s.store.CreateAPIToken(ctx, store.CreateAPITokenInput{
+		IdentityID:  identityID,
+		Name:        name,
+		TokenHash:   generated.Hash,
+		TokenPrefix: generated.TokenPrefix,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	return &usersv1.CreateAPITokenResponse{
+		Token:          toProtoAPIToken(token),
+		PlaintextToken: generated.Plaintext,
+	}, nil
+}
+
+func (s *Server) ListAPITokens(ctx context.Context, _ *usersv1.ListAPITokensRequest) (*usersv1.ListAPITokensResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tokens, err := s.store.ListAPITokens(ctx, identityID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	protoTokens := make([]*usersv1.APIToken, 0, len(tokens))
+	for _, token := range tokens {
+		protoTokens = append(protoTokens, toProtoAPIToken(token))
+	}
+
+	return &usersv1.ListAPITokensResponse{Tokens: protoTokens}, nil
+}
+
+func (s *Server) RevokeAPIToken(ctx context.Context, req *usersv1.RevokeAPITokenRequest) (*usersv1.RevokeAPITokenResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenID, err := parseUUID(req.GetTokenId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "token_id: %v", err)
+	}
+
+	if err := s.store.RevokeAPIToken(ctx, tokenID, identityID); err != nil {
+		return nil, toStatusError(err)
+	}
+
+	return &usersv1.RevokeAPITokenResponse{}, nil
+}
+
+func (s *Server) ResolveAPIToken(ctx context.Context, req *usersv1.ResolveAPITokenRequest) (*usersv1.ResolveAPITokenResponse, error) {
+	tokenHash := req.GetTokenHash()
+	if tokenHash == "" {
+		return nil, status.Error(codes.InvalidArgument, "token_hash must be provided")
+	}
+
+	token, err := s.store.ResolveAPIToken(ctx, tokenHash)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	if token.ExpiresAt != nil {
+		now := time.Now()
+		if !token.ExpiresAt.After(now) {
+			return nil, status.Error(codes.Unauthenticated, "api token expired")
+		}
+	}
+
+	return &usersv1.ResolveAPITokenResponse{
+		IdentityId: token.IdentityID.String(),
+		Token:      toProtoAPIToken(token),
+	}, nil
+}
+
 func parseUUID(value string) (uuid.UUID, error) {
 	if value == "" {
 		return uuid.UUID{}, fmt.Errorf("value is empty")
@@ -130,6 +240,22 @@ func parseUUID(value string) (uuid.UUID, error) {
 		return uuid.UUID{}, err
 	}
 	return id, nil
+}
+
+func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
+	metadataValues, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return uuid.UUID{}, status.Error(codes.Unauthenticated, "x-identity-id metadata is required")
+	}
+	identityValues := metadataValues.Get("x-identity-id")
+	if len(identityValues) == 0 || identityValues[0] == "" {
+		return uuid.UUID{}, status.Error(codes.Unauthenticated, "x-identity-id metadata is required")
+	}
+	identityID, err := parseUUID(identityValues[0])
+	if err != nil {
+		return uuid.UUID{}, status.Errorf(codes.Unauthenticated, "x-identity-id: %v", err)
+	}
+	return identityID, nil
 }
 
 func toStatusError(err error) error {
