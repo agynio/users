@@ -141,6 +141,10 @@ func (s *Server) CreateAPIToken(ctx context.Context, req *usersv1.CreateAPIToken
 			return nil, status.Errorf(codes.InvalidArgument, "expires_at: %v", err)
 		}
 		value := req.ExpiresAt.AsTime()
+		now := time.Now()
+		if !value.After(now) {
+			return nil, status.Error(codes.InvalidArgument, "expires_at must be in the future")
+		}
 		expiresAt = &value
 	}
 
@@ -149,7 +153,13 @@ func (s *Server) CreateAPIToken(ctx context.Context, req *usersv1.CreateAPIToken
 		return nil, status.Errorf(codes.Internal, "generate token: %v", err)
 	}
 
-	token, err := s.store.CreateAPIToken(ctx, identityID, name, generated.Hash, generated.TokenPrefix, expiresAt)
+	token, err := s.store.CreateAPIToken(ctx, store.CreateAPITokenInput{
+		IdentityID:  identityID,
+		Name:        name,
+		TokenHash:   generated.Hash,
+		TokenPrefix: generated.TokenPrefix,
+		ExpiresAt:   expiresAt,
+	})
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -245,10 +255,6 @@ func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
 }
 
 func toStatusError(err error) error {
-	var expired *store.ExpiredError
-	if errors.As(err, &expired) {
-		return status.Error(codes.Unauthenticated, expired.Error())
-	}
 	var notFound *store.NotFoundError
 	if errors.As(err, &notFound) {
 		return status.Error(codes.NotFound, notFound.Error())

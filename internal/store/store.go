@@ -56,6 +56,14 @@ type APIToken struct {
 	LastUsedAt  *time.Time
 }
 
+type CreateAPITokenInput struct {
+	IdentityID  uuid.UUID
+	Name        string
+	TokenHash   string
+	TokenPrefix string
+	ExpiresAt   *time.Time
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -246,16 +254,16 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 	return user, nil
 }
 
-func (s *Store) CreateAPIToken(ctx context.Context, identityID uuid.UUID, name string, tokenHash string, tokenPrefix string, expiresAt *time.Time) (APIToken, error) {
+func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {
 	row := s.pool.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO user_api_tokens (identity_id, name, token_hash, token_prefix, expires_at)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING %s`, apiTokenColumns),
-		identityID,
-		name,
-		tokenHash,
-		tokenPrefix,
-		expiresAt,
+		input.IdentityID,
+		input.Name,
+		input.TokenHash,
+		input.TokenPrefix,
+		input.ExpiresAt,
 	)
 	apiToken, err := scanAPIToken(row)
 	if err != nil {
@@ -304,22 +312,31 @@ func (s *Store) RevokeAPIToken(ctx context.Context, identityID uuid.UUID, tokenI
 }
 
 func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken, error) {
+	// Skip last_used_at updates for expired tokens; expiration is enforced in the server layer.
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`SELECT %s FROM user_api_tokens WHERE token_hash = $1`, apiTokenColumns),
+		fmt.Sprintf(`UPDATE user_api_tokens SET last_used_at = NOW()
+        WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
+        RETURNING %s`, apiTokenColumns),
 		tokenHash,
 	)
 	apiToken, err := scanAPIToken(row)
+	if err == nil {
+		return apiToken, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return APIToken{}, err
+	}
+
+	row = s.pool.QueryRow(ctx,
+		fmt.Sprintf(`SELECT %s FROM user_api_tokens WHERE token_hash = $1`, apiTokenColumns),
+		tokenHash,
+	)
+	apiToken, err = scanAPIToken(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return APIToken{}, NotFound("api token")
 		}
 		return APIToken{}, err
-	}
-
-	if apiToken.ExpiresAt == nil || apiToken.ExpiresAt.After(time.Now()) {
-		go func(tokenID uuid.UUID) {
-			_, _ = s.pool.Exec(context.Background(), `UPDATE user_api_tokens SET last_used_at = NOW() WHERE id = $1`, tokenID)
-		}(apiToken.ID)
 	}
 
 	return apiToken, nil
