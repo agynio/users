@@ -200,7 +200,7 @@ func (s *Server) RevokeAPIToken(ctx context.Context, req *usersv1.RevokeAPIToken
 		return nil, status.Errorf(codes.InvalidArgument, "token_id: %v", err)
 	}
 
-	if err := s.store.RevokeAPIToken(ctx, tokenID, identityID); err != nil {
+	if err := s.store.RevokeAPIToken(ctx, identityID, tokenID); err != nil {
 		return nil, toStatusError(err)
 	}
 
@@ -216,6 +216,9 @@ func (s *Server) ResolveAPIToken(ctx context.Context, req *usersv1.ResolveAPITok
 	token, err := s.store.ResolveAPIToken(ctx, tokenHash)
 	if err != nil {
 		return nil, toStatusError(err)
+	}
+	if token.ExpiresAt != nil && !token.ExpiresAt.After(time.Now()) {
+		return nil, status.Error(codes.Unauthenticated, "api token expired")
 	}
 
 	return &usersv1.ResolveAPITokenResponse{
@@ -252,10 +255,6 @@ func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
 }
 
 func toStatusError(err error) error {
-	var expired *store.ExpiredError
-	if errors.As(err, &expired) {
-		return status.Error(codes.Unauthenticated, expired.Error())
-	}
 	var notFound *store.NotFoundError
 	if errors.As(err, &notFound) {
 		return status.Error(codes.NotFound, notFound.Error())

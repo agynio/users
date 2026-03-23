@@ -86,7 +86,6 @@ func scanUser(row pgx.Row) (User, error) {
 		return User{}, err
 	}
 	return user, nil
-
 }
 
 func scanAPIToken(row pgx.Row) (APIToken, error) {
@@ -132,8 +131,8 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 	identityID := uuid.New()
 	row = s.pool.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, photo_url)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING %s`, userColumns),
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING %s`, userColumns),
 		identityID,
 		input.OIDCSubject,
 		input.Name,
@@ -297,7 +296,7 @@ func (s *Store) ListAPITokens(ctx context.Context, identityID uuid.UUID) ([]APIT
 	return tokens, nil
 }
 
-func (s *Store) RevokeAPIToken(ctx context.Context, tokenID uuid.UUID, identityID uuid.UUID) error {
+func (s *Store) RevokeAPIToken(ctx context.Context, identityID uuid.UUID, tokenID uuid.UUID) error {
 	result, err := s.pool.Exec(ctx,
 		`DELETE FROM user_api_tokens WHERE id = $1 AND identity_id = $2`,
 		tokenID,
@@ -313,6 +312,7 @@ func (s *Store) RevokeAPIToken(ctx context.Context, tokenID uuid.UUID, identityI
 }
 
 func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken, error) {
+	// Skip last_used_at updates for expired tokens; expiration is enforced in the server layer.
 	row := s.pool.QueryRow(ctx,
 		fmt.Sprintf(`UPDATE user_api_tokens SET last_used_at = NOW()
         WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
@@ -320,22 +320,24 @@ func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken
 		tokenHash,
 	)
 	apiToken, err := scanAPIToken(row)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return APIToken{}, err
-		}
-
-		var expiresAt pgtype.Timestamptz
-		if err := s.pool.QueryRow(ctx, `SELECT expires_at FROM user_api_tokens WHERE token_hash = $1`, tokenHash).Scan(&expiresAt); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return APIToken{}, NotFound("api token")
-			}
-			return APIToken{}, err
-		}
-		if expiresAt.Valid && !expiresAt.Time.After(time.Now()) {
-			return APIToken{}, Expired("api token")
-		}
-		return APIToken{}, fmt.Errorf("api token resolve failed to update")
+	if err == nil {
+		return apiToken, nil
 	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return APIToken{}, err
+	}
+
+	row = s.pool.QueryRow(ctx,
+		fmt.Sprintf(`SELECT %s FROM user_api_tokens WHERE token_hash = $1`, apiTokenColumns),
+		tokenHash,
+	)
+	apiToken, err = scanAPIToken(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return APIToken{}, NotFound("api token")
+		}
+		return APIToken{}, err
+	}
+
 	return apiToken, nil
 }
