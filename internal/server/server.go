@@ -141,10 +141,6 @@ func (s *Server) CreateAPIToken(ctx context.Context, req *usersv1.CreateAPIToken
 			return nil, status.Errorf(codes.InvalidArgument, "expires_at: %v", err)
 		}
 		value := req.ExpiresAt.AsTime()
-		now := time.Now()
-		if !value.After(now) {
-			return nil, status.Error(codes.InvalidArgument, "expires_at must be in the future")
-		}
 		expiresAt = &value
 	}
 
@@ -153,13 +149,7 @@ func (s *Server) CreateAPIToken(ctx context.Context, req *usersv1.CreateAPIToken
 		return nil, status.Errorf(codes.Internal, "generate token: %v", err)
 	}
 
-	token, err := s.store.CreateAPIToken(ctx, store.CreateAPITokenInput{
-		IdentityID:  identityID,
-		Name:        name,
-		TokenHash:   generated.Hash,
-		TokenPrefix: generated.TokenPrefix,
-		ExpiresAt:   expiresAt,
-	})
+	token, err := s.store.CreateAPIToken(ctx, identityID, name, generated.Hash, generated.TokenPrefix, expiresAt)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -200,7 +190,7 @@ func (s *Server) RevokeAPIToken(ctx context.Context, req *usersv1.RevokeAPIToken
 		return nil, status.Errorf(codes.InvalidArgument, "token_id: %v", err)
 	}
 
-	if err := s.store.RevokeAPIToken(ctx, tokenID, identityID); err != nil {
+	if err := s.store.RevokeAPIToken(ctx, identityID, tokenID); err != nil {
 		return nil, toStatusError(err)
 	}
 
@@ -216,6 +206,9 @@ func (s *Server) ResolveAPIToken(ctx context.Context, req *usersv1.ResolveAPITok
 	token, err := s.store.ResolveAPIToken(ctx, tokenHash)
 	if err != nil {
 		return nil, toStatusError(err)
+	}
+	if token.ExpiresAt != nil && !token.ExpiresAt.After(time.Now()) {
+		return nil, status.Error(codes.Unauthenticated, "api token expired")
 	}
 
 	return &usersv1.ResolveAPITokenResponse{

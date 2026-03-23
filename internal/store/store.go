@@ -56,14 +56,6 @@ type APIToken struct {
 	LastUsedAt  *time.Time
 }
 
-type CreateAPITokenInput struct {
-	IdentityID  uuid.UUID
-	Name        string
-	TokenHash   string
-	TokenPrefix string
-	ExpiresAt   *time.Time
-}
-
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -86,7 +78,6 @@ func scanUser(row pgx.Row) (User, error) {
 		return User{}, err
 	}
 	return user, nil
-
 }
 
 func scanAPIToken(row pgx.Row) (APIToken, error) {
@@ -132,8 +123,8 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 	identityID := uuid.New()
 	row = s.pool.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, photo_url)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING %s`, userColumns),
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING %s`, userColumns),
 		identityID,
 		input.OIDCSubject,
 		input.Name,
@@ -255,16 +246,16 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 	return user, nil
 }
 
-func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {
+func (s *Store) CreateAPIToken(ctx context.Context, identityID uuid.UUID, name string, tokenHash string, tokenPrefix string, expiresAt *time.Time) (APIToken, error) {
 	row := s.pool.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO user_api_tokens (identity_id, name, token_hash, token_prefix, expires_at)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING %s`, apiTokenColumns),
-		input.IdentityID,
-		input.Name,
-		input.TokenHash,
-		input.TokenPrefix,
-		input.ExpiresAt,
+		identityID,
+		name,
+		tokenHash,
+		tokenPrefix,
+		expiresAt,
 	)
 	apiToken, err := scanAPIToken(row)
 	if err != nil {
@@ -297,7 +288,7 @@ func (s *Store) ListAPITokens(ctx context.Context, identityID uuid.UUID) ([]APIT
 	return tokens, nil
 }
 
-func (s *Store) RevokeAPIToken(ctx context.Context, tokenID uuid.UUID, identityID uuid.UUID) error {
+func (s *Store) RevokeAPIToken(ctx context.Context, identityID uuid.UUID, tokenID uuid.UUID) error {
 	result, err := s.pool.Exec(ctx,
 		`DELETE FROM user_api_tokens WHERE id = $1 AND identity_id = $2`,
 		tokenID,
@@ -314,28 +305,22 @@ func (s *Store) RevokeAPIToken(ctx context.Context, tokenID uuid.UUID, identityI
 
 func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken, error) {
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE user_api_tokens SET last_used_at = NOW()
-        WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > NOW())
-        RETURNING %s`, apiTokenColumns),
+		fmt.Sprintf(`SELECT %s FROM user_api_tokens WHERE token_hash = $1`, apiTokenColumns),
 		tokenHash,
 	)
 	apiToken, err := scanAPIToken(row)
 	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return APIToken{}, err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return APIToken{}, NotFound("api token")
 		}
-
-		var expiresAt pgtype.Timestamptz
-		if err := s.pool.QueryRow(ctx, `SELECT expires_at FROM user_api_tokens WHERE token_hash = $1`, tokenHash).Scan(&expiresAt); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return APIToken{}, NotFound("api token")
-			}
-			return APIToken{}, err
-		}
-		if expiresAt.Valid && !expiresAt.Time.After(time.Now()) {
-			return APIToken{}, Expired("api token")
-		}
-		return APIToken{}, fmt.Errorf("api token resolve failed to update")
+		return APIToken{}, err
 	}
+
+	if apiToken.ExpiresAt == nil || apiToken.ExpiresAt.After(time.Now()) {
+		go func(tokenID uuid.UUID) {
+			_, _ = s.pool.Exec(context.Background(), `UPDATE user_api_tokens SET last_used_at = NOW() WHERE id = $1`, tokenID)
+		}(apiToken.ID)
+	}
+
 	return apiToken, nil
 }
