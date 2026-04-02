@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	userColumns     = `identity_id, oidc_subject, name, email, photo_url, created_at, updated_at`
+	userColumns     = `identity_id, oidc_subject, name, email, nickname, photo_url, created_at, updated_at`
 	apiTokenColumns = `id, identity_id, name, token_hash, token_prefix, expires_at, created_at, last_used_at`
 )
 
@@ -29,6 +29,7 @@ type User struct {
 	OIDCSubject string
 	Name        string
 	Email       string
+	Nickname    string
 	PhotoURL    string
 }
 
@@ -36,13 +37,20 @@ type UserInput struct {
 	OIDCSubject string
 	Name        string
 	Email       string
+	Nickname    string
 	PhotoURL    string
 }
 
 type UserUpdate struct {
 	Name     *string
 	Email    *string
+	Nickname *string
 	PhotoURL *string
+}
+
+type UserListResult struct {
+	Users      []User
+	NextCursor *PageCursor
 }
 
 type APIToken struct {
@@ -79,6 +87,7 @@ func scanUser(row pgx.Row) (User, error) {
 		&user.OIDCSubject,
 		&user.Name,
 		&user.Email,
+		&user.Nickname,
 		&user.PhotoURL,
 		&user.Meta.CreatedAt,
 		&user.Meta.UpdatedAt,
@@ -130,13 +139,14 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 
 	identityID := uuid.New()
 	row = s.pool.QueryRow(ctx,
-		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, photo_url)
-        VALUES ($1, $2, $3, $4, $5)
+		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, photo_url)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING %s`, userColumns),
 		identityID,
 		input.OIDCSubject,
 		input.Name,
 		input.Email,
+		input.Nickname,
 		input.PhotoURL,
 	)
 	user, err = scanUser(row)
@@ -162,6 +172,30 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 	// TODO: Call Identity.RegisterIdentity(identityID, "user") here.
 
 	return user, true, nil
+}
+
+func (s *Store) CreateUser(ctx context.Context, input UserInput) (User, error) {
+	identityID := uuid.New()
+	row := s.pool.QueryRow(ctx,
+		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, photo_url)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING %s`, userColumns),
+		identityID,
+		input.OIDCSubject,
+		input.Name,
+		input.Email,
+		input.Nickname,
+		input.PhotoURL,
+	)
+	user, err := scanUser(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return User{}, AlreadyExists("user")
+		}
+		return User{}, err
+	}
+	return user, nil
 }
 
 func (s *Store) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
@@ -235,6 +269,9 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 	if update.Email != nil {
 		builder.add("email", *update.Email)
 	}
+	if update.Nickname != nil {
+		builder.add("nickname", *update.Nickname)
+	}
 	if update.PhotoURL != nil {
 		builder.add("photo_url", *update.PhotoURL)
 	}
@@ -252,6 +289,33 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 		return User{}, err
 	}
 	return user, nil
+}
+
+func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	result, err := s.pool.Exec(ctx, `DELETE FROM users WHERE identity_id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return NotFound("user")
+	}
+	return nil
+}
+
+func (s *Store) ListUsers(ctx context.Context, pageSize int32, cursor *PageCursor) (UserListResult, error) {
+	users, nextCursor, err := listEntities(ctx, s.pool,
+		fmt.Sprintf("SELECT %s FROM users", userColumns),
+		nil,
+		nil,
+		cursor,
+		pageSize,
+		scanUser,
+		func(user User) uuid.UUID { return user.Meta.ID },
+	)
+	if err != nil {
+		return UserListResult{}, err
+	}
+	return UserListResult{Users: users, NextCursor: nextCursor}, nil
 }
 
 func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {

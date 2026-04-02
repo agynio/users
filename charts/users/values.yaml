@@ -74,6 +74,10 @@ env:
     value: ":50051"
   - name: DATABASE_URL
     value: ""
+  - name: AUTHORIZATION_ADDRESS
+    value: ""
+  - name: IDENTITY_ADDRESS
+    value: ""
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""

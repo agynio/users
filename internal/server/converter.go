@@ -20,6 +20,7 @@ func toProtoUser(user store.User) *usersv1.User {
 		OidcSubject: user.OIDCSubject,
 		Name:        user.Name,
 		Email:       user.Email,
+		Nickname:    user.Nickname,
 		PhotoUrl:    user.PhotoURL,
 	}
 }
