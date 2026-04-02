@@ -102,10 +102,7 @@ func (s *Server) syncClusterRole(ctx context.Context, identityID uuid.UUID, role
 		return fmt.Errorf("unsupported cluster role: %s", role.String())
 	}
 	_, err := s.authorizationClient.Write(ctx, request)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOrCreateUserRequest) (*usersv1.ResolveOrCreateUserResponse, error) {
@@ -393,7 +390,6 @@ func (s *Server) CreateUser(ctx context.Context, req *usersv1.CreateUserRequest)
 	user, err := s.store.CreateUser(ctx, store.UserInput{
 		OIDCSubject: oidcSubject,
 		Name:        req.GetName(),
-		Email:       "",
 		Nickname:    req.GetNickname(),
 		PhotoURL:    req.GetPhotoUrl(),
 	})
@@ -413,6 +409,7 @@ func (s *Server) CreateUser(ctx context.Context, req *usersv1.CreateUserRequest)
 	if req.GetClusterRole() == usersv1.ClusterRole_CLUSTER_ROLE_ADMIN {
 		if err := s.syncClusterRole(ctx, user.Meta.ID, req.GetClusterRole()); err != nil {
 			_ = s.store.DeleteUser(ctx, user.Meta.ID)
+			// TODO: Identity deletion is not supported yet; this leaves an orphaned identity.
 			return nil, status.Errorf(codes.Internal, "sync cluster role: %v", err)
 		}
 	}
@@ -427,19 +424,20 @@ func (s *Server) DeleteUser(ctx context.Context, req *usersv1.DeleteUserRequest)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "identity_id: %v", err)
 	}
-	if err := s.store.DeleteUser(ctx, id); err != nil {
-		return nil, toStatusError(err)
-	}
-
 	identityObject := fmt.Sprintf("%s%s", identityObjectPrefix, id.String())
-	_ = s.syncClusterRole(ctx, id, usersv1.ClusterRole_CLUSTER_ROLE_UNSPECIFIED)
+	if err := s.syncClusterRole(ctx, id, usersv1.ClusterRole_CLUSTER_ROLE_UNSPECIFIED); err != nil {
+		return nil, status.Errorf(codes.Internal, "sync cluster role: %v", err)
+	}
 
 	authResponse, err := s.authorizationClient.ListObjects(ctx, &authorizationv1.ListObjectsRequest{
 		Type:     "organization",
 		Relation: "member",
 		User:     identityObject,
 	})
-	if err == nil && len(authResponse.Objects) > 0 {
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list organization memberships: %v", err)
+	}
+	if len(authResponse.Objects) > 0 {
 		deletes := make([]*authorizationv1.TupleKey, 0, len(authResponse.Objects))
 		for _, object := range authResponse.Objects {
 			deletes = append(deletes, &authorizationv1.TupleKey{
@@ -449,8 +447,14 @@ func (s *Server) DeleteUser(ctx context.Context, req *usersv1.DeleteUserRequest)
 			})
 		}
 		if len(deletes) > 0 {
-			_, _ = s.authorizationClient.Write(ctx, &authorizationv1.WriteRequest{Deletes: deletes})
+			if _, err := s.authorizationClient.Write(ctx, &authorizationv1.WriteRequest{Deletes: deletes}); err != nil {
+				return nil, status.Errorf(codes.Internal, "remove organization memberships: %v", err)
+			}
 		}
+	}
+
+	if err := s.store.DeleteUser(ctx, id); err != nil {
+		return nil, toStatusError(err)
 	}
 
 	// TODO: Delete identity records once Identity supports removal.

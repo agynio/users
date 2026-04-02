@@ -52,13 +52,13 @@ func run() error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 
-	authConn, err := grpc.DialContext(ctx, cfg.AuthorizationAddress, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	authConn, err := grpc.NewClient(cfg.AuthorizationAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("connect to authorization: %w", err)
 	}
 	defer authConn.Close()
 
-	identityConn, err := grpc.DialContext(ctx, cfg.IdentityAddress, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	identityConn, err := grpc.NewClient(cfg.IdentityAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("connect to identity: %w", err)
 	}

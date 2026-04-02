@@ -54,6 +54,7 @@ func listEntities[T any](
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	baseQuery string,
+	cursorColumn string,
 	clauses []string,
 	args []any,
 	cursor *PageCursor,
@@ -68,7 +69,7 @@ func listEntities[T any](
 
 	paramIndex := len(args) + 1
 	if cursor != nil {
-		clauses = append(clauses, fmt.Sprintf("identity_id > $%d", paramIndex))
+		clauses = append(clauses, fmt.Sprintf("%s > $%d", cursorColumn, paramIndex))
 		args = append(args, cursor.AfterID)
 		paramIndex++
 	}
@@ -77,7 +78,7 @@ func listEntities[T any](
 		query.WriteString(" WHERE ")
 		query.WriteString(strings.Join(clauses, " AND "))
 	}
-	query.WriteString(fmt.Sprintf(" ORDER BY identity_id ASC LIMIT $%d", paramIndex))
+	query.WriteString(fmt.Sprintf(" ORDER BY %s ASC LIMIT $%d", cursorColumn, paramIndex))
 	args = append(args, int(limit)+1)
 
 	rows, err := pool.Query(ctx, query.String(), args...)
