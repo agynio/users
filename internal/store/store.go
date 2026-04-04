@@ -80,6 +80,10 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 func scanUser(row pgx.Row) (User, error) {
 	var user User
 	if err := row.Scan(
@@ -124,21 +128,46 @@ func scanAPIToken(row pgx.Row) (APIToken, error) {
 	return token, nil
 }
 
-func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User, bool, error) {
-	row := s.pool.QueryRow(ctx,
+func countUsers(ctx context.Context, querier rowQuerier) (int64, error) {
+	var count int64
+	err := querier.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count)
+	return count, err
+}
+
+func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User, bool, int64, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return User{}, false, 0, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if _, err := tx.Exec(ctx, "LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+		return User{}, false, 0, err
+	}
+
+	row := tx.QueryRow(ctx,
 		fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
 		input.OIDCSubject,
 	)
 	user, err := scanUser(row)
 	if err == nil {
-		return user, false, nil
+		count, err := countUsers(ctx, tx)
+		if err != nil {
+			return User{}, false, 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return User{}, false, 0, err
+		}
+		return user, false, count, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return User{}, false, err
+		return User{}, false, 0, err
 	}
 
 	identityID := uuid.New()
-	row = s.pool.QueryRow(ctx,
+	row = tx.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, photo_url)
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING %s`, userColumns),
@@ -153,31 +182,40 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			row = s.pool.QueryRow(ctx,
+			row = tx.QueryRow(ctx,
 				fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
 				input.OIDCSubject,
 			)
 			user, err = scanUser(row)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					return User{}, false, NotFound("user")
+					return User{}, false, 0, NotFound("user")
 				}
-				return User{}, false, err
+				return User{}, false, 0, err
 			}
-			return user, false, nil
+			count, err := countUsers(ctx, tx)
+			if err != nil {
+				return User{}, false, 0, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return User{}, false, 0, err
+			}
+			return user, false, count, nil
 		}
-		return User{}, false, err
+		return User{}, false, 0, err
 	}
 
 	// TODO: Call Identity.RegisterIdentity(identityID, "user") here.
 
-	return user, true, nil
-}
+	count, err := countUsers(ctx, tx)
+	if err != nil {
+		return User{}, false, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, false, 0, err
+	}
 
-func (s *Store) CountUsers(ctx context.Context) (int64, error) {
-	var count int64
-	err := s.pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count)
-	return count, err
+	return user, true, count, nil
 }
 
 func (s *Store) CreateUser(ctx context.Context, input UserInput) (User, error) {
