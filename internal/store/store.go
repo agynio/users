@@ -135,6 +135,18 @@ func countUsers(ctx context.Context, querier rowQuerier) (int64, error) {
 }
 
 func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User, bool, int64, error) {
+	row := s.pool.QueryRow(ctx,
+		fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
+		input.OIDCSubject,
+	)
+	user, err := scanUser(row)
+	if err == nil {
+		return user, false, 0, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return User{}, false, 0, err
+	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return User{}, false, 0, err
@@ -147,20 +159,16 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 		return User{}, false, 0, err
 	}
 
-	row := tx.QueryRow(ctx,
+	row = tx.QueryRow(ctx,
 		fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
 		input.OIDCSubject,
 	)
-	user, err := scanUser(row)
+	user, err = scanUser(row)
 	if err == nil {
-		count, err := countUsers(ctx, tx)
-		if err != nil {
-			return User{}, false, 0, err
-		}
 		if err := tx.Commit(ctx); err != nil {
 			return User{}, false, 0, err
 		}
-		return user, false, count, nil
+		return user, false, 0, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return User{}, false, 0, err
@@ -193,14 +201,10 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 				}
 				return User{}, false, 0, err
 			}
-			count, err := countUsers(ctx, tx)
-			if err != nil {
-				return User{}, false, 0, err
-			}
 			if err := tx.Commit(ctx); err != nil {
 				return User{}, false, 0, err
 			}
-			return user, false, count, nil
+			return user, false, 0, nil
 		}
 		return User{}, false, 0, err
 	}
