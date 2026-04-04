@@ -305,11 +305,11 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID) error {
 func (s *Store) ListUsers(ctx context.Context, pageSize int32, cursor *PageCursor) (UserListResult, error) {
 	users, nextCursor, err := listEntities(ctx, s.pool,
 		fmt.Sprintf("SELECT %s FROM users", userColumns),
-		"identity_id",
 		nil,
 		nil,
 		cursor,
 		pageSize,
+		"identity_id",
 		scanUser,
 		func(user User) uuid.UUID { return user.Meta.ID },
 	)
