@@ -119,6 +119,16 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 	if err != nil {
 		return nil, toStatusError(err)
 	}
+	if created {
+		_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
+			IdentityId:   user.Meta.ID.String(),
+			IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER,
+		})
+		if err != nil {
+			_ = s.store.DeleteUser(ctx, user.Meta.ID)
+			return nil, status.Errorf(codes.Internal, "register identity: %v", err)
+		}
+	}
 	return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 }
 
