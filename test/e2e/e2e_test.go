@@ -35,7 +35,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Alice",
-			Nickname:    "ally",
+			Email:       "alice@example.com",
 			PhotoUrl:    "https://example.com/photo.png",
 		})
 		require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		resolveResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Alice Updated",
-			Nickname:    "ally-2",
+			Email:       "alice-updated@example.com",
 			PhotoUrl:    "https://example.com/updated.png",
 		})
 		require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Bob",
-			Nickname:    "bobby",
+			Email:       "bob@example.com",
 			PhotoUrl:    "https://example.com/bob.png",
 		})
 		require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Charlie",
-			Nickname:    "char",
+			Email:       "charlie@example.com",
 			PhotoUrl:    "https://example.com/charlie.png",
 		})
 		require.NoError(t, err)
@@ -90,14 +90,14 @@ func TestUsersServiceE2E(t *testing.T) {
 		firstResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: firstSubject,
 			Name:        "Dana",
-			Nickname:    "d",
+			Email:       "dana@example.com",
 			PhotoUrl:    "https://example.com/dana.png",
 		})
 		require.NoError(t, err)
 		secondResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: secondSubject,
 			Name:        "Elliot",
-			Nickname:    "ell",
+			Email:       "elliot@example.com",
 			PhotoUrl:    "https://example.com/elliot.png",
 		})
 		require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestUsersServiceE2E(t *testing.T) {
 		createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,
 			Name:        "Frank",
-			Nickname:    "frankie",
+			Email:       "frank@example.com",
 			PhotoUrl:    "https://example.com/frank.png",
 		})
 		require.NoError(t, err)
@@ -129,6 +129,63 @@ func TestUsersServiceE2E(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "Frank Updated", updateResp.User.Name)
 		require.Equal(t, "https://example.com/frank-updated.png", updateResp.User.PhotoUrl)
+	})
+
+	t.Run("ListUsers", func(t *testing.T) {
+		userInputs := []struct {
+			name  string
+			email string
+		}{
+			{name: "List User One", email: "list-one@example.com"},
+			{name: "List User Two", email: "list-two@example.com"},
+			{name: "List User Three", email: "list-three@example.com"},
+		}
+		createdIDs := make([]string, 0, len(userInputs))
+		for _, input := range userInputs {
+			subject := "oidc-" + uuid.NewString()
+			createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
+				OidcSubject: subject,
+				Name:        input.name,
+				Email:       input.email,
+				PhotoUrl:    "https://example.com/list.png",
+			})
+			require.NoError(t, err)
+			createdIDs = append(createdIDs, createResp.User.Meta.Id)
+		}
+
+		pageToken := ""
+		drained := false
+		var listed []*usersv1.User
+		for i := 0; i < 20; i++ {
+			resp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageSize: 1, PageToken: pageToken})
+			require.NoError(t, err)
+			if i == 0 {
+				require.NotEmpty(t, resp.Users)
+				require.NotEmpty(t, resp.NextPageToken)
+			}
+			listed = append(listed, resp.Users...)
+			pageToken = resp.NextPageToken
+			if pageToken == "" {
+				drained = true
+				break
+			}
+		}
+		require.True(t, drained)
+		for _, id := range createdIDs {
+			require.True(t, hasUserID(listed, id))
+		}
+
+		firstPageResp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageSize: 1})
+		require.NoError(t, err)
+		require.NotEmpty(t, firstPageResp.Users)
+
+		defaultPageResp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageToken: ""})
+		require.NoError(t, err)
+		require.NotEmpty(t, defaultPageResp.Users)
+		require.Equal(t, firstPageResp.Users[0].GetMeta().GetId(), defaultPageResp.Users[0].GetMeta().GetId())
+
+		_, err = client.ListUsers(ctx, &usersv1.ListUsersRequest{PageToken: "invalid-token"})
+		requireStatusCode(t, err, codes.InvalidArgument)
 	})
 
 	t.Run("NegativePaths", func(t *testing.T) {
@@ -145,6 +202,13 @@ func TestUsersServiceE2E(t *testing.T) {
 		requireStatusCode(t, err, codes.InvalidArgument)
 
 		_, err = client.BatchGetUsers(ctx, &usersv1.BatchGetUsersRequest{IdentityIds: []string{"bad"}})
+		requireStatusCode(t, err, codes.InvalidArgument)
+
+		ids := make([]string, 101)
+		for i := range ids {
+			ids[i] = uuid.NewString()
+		}
+		_, err = client.BatchGetUsers(ctx, &usersv1.BatchGetUsersRequest{IdentityIds: ids})
 		requireStatusCode(t, err, codes.InvalidArgument)
 
 		_, err = client.UpdateUser(ctx, &usersv1.UpdateUserRequest{IdentityId: uuid.NewString()})
