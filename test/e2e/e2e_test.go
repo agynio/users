@@ -131,6 +131,63 @@ func TestUsersServiceE2E(t *testing.T) {
 		require.Equal(t, "https://example.com/frank-updated.png", updateResp.User.PhotoUrl)
 	})
 
+	t.Run("ListUsers", func(t *testing.T) {
+		userInputs := []struct {
+			name  string
+			email string
+		}{
+			{name: "List User One", email: "list-one@example.com"},
+			{name: "List User Two", email: "list-two@example.com"},
+			{name: "List User Three", email: "list-three@example.com"},
+		}
+		createdIDs := make([]string, 0, len(userInputs))
+		for _, input := range userInputs {
+			subject := "oidc-" + uuid.NewString()
+			createResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
+				OidcSubject: subject,
+				Name:        input.name,
+				Email:       input.email,
+				PhotoUrl:    "https://example.com/list.png",
+			})
+			require.NoError(t, err)
+			createdIDs = append(createdIDs, createResp.User.Meta.Id)
+		}
+
+		pageToken := ""
+		drained := false
+		var listed []*usersv1.User
+		for i := 0; i < 20; i++ {
+			resp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageSize: 1, PageToken: pageToken})
+			require.NoError(t, err)
+			if i == 0 {
+				require.NotEmpty(t, resp.Users)
+				require.NotEmpty(t, resp.NextPageToken)
+			}
+			listed = append(listed, resp.Users...)
+			pageToken = resp.NextPageToken
+			if pageToken == "" {
+				drained = true
+				break
+			}
+		}
+		require.True(t, drained)
+		for _, id := range createdIDs {
+			require.True(t, hasUserID(listed, id))
+		}
+
+		firstPageResp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageSize: 1})
+		require.NoError(t, err)
+		require.NotEmpty(t, firstPageResp.Users)
+
+		defaultPageResp, err := client.ListUsers(ctx, &usersv1.ListUsersRequest{PageToken: ""})
+		require.NoError(t, err)
+		require.NotEmpty(t, defaultPageResp.Users)
+		require.Equal(t, firstPageResp.Users[0].GetMeta().GetId(), defaultPageResp.Users[0].GetMeta().GetId())
+
+		_, err = client.ListUsers(ctx, &usersv1.ListUsersRequest{PageToken: "invalid-token"})
+		requireStatusCode(t, err, codes.InvalidArgument)
+	})
+
 	t.Run("NegativePaths", func(t *testing.T) {
 		_, err := client.GetUser(ctx, &usersv1.GetUserRequest{IdentityId: uuid.NewString()})
 		requireStatusCode(t, err, codes.NotFound)

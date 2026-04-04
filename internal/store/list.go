@@ -22,26 +22,28 @@ func listEntities[T any](
 	scan func(pgx.Row) (T, error),
 	idFunc func(T) uuid.UUID,
 ) ([]T, *PageCursor, error) {
+	localClauses := append([]string(nil), clauses...)
+	localArgs := append([]any(nil), args...)
 	limit := NormalizePageSize(pageSize)
 
 	query := strings.Builder{}
 	query.WriteString(baseQuery)
 
-	paramIndex := len(args) + 1
+	paramIndex := len(localArgs) + 1
 	if cursor != nil {
-		clauses = append(clauses, fmt.Sprintf("%s > $%d", idColumn, paramIndex))
-		args = append(args, cursor.AfterID)
+		localClauses = append(localClauses, fmt.Sprintf("%s > $%d", idColumn, paramIndex))
+		localArgs = append(localArgs, cursor.AfterID)
 		paramIndex++
 	}
 
-	if len(clauses) > 0 {
+	if len(localClauses) > 0 {
 		query.WriteString(" WHERE ")
-		query.WriteString(strings.Join(clauses, " AND "))
+		query.WriteString(strings.Join(localClauses, " AND "))
 	}
 	query.WriteString(fmt.Sprintf(" ORDER BY %s ASC LIMIT $%d", idColumn, paramIndex))
-	args = append(args, int(limit)+1)
+	localArgs = append(localArgs, int(limit)+1)
 
-	rows, err := pool.Query(ctx, query.String(), args...)
+	rows, err := pool.Query(ctx, query.String(), localArgs...)
 	if err != nil {
 		return nil, nil, err
 	}
