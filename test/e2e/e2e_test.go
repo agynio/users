@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -41,6 +42,12 @@ func TestUsersServiceE2E(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, createResp.Created)
 		require.Equal(t, subject, createResp.User.OidcSubject)
+
+		authedCtx := metadata.AppendToOutgoingContext(ctx, "x-identity-id", createResp.User.Meta.Id)
+		meResp, err := client.GetMe(authedCtx, &usersv1.GetMeRequest{})
+		require.NoError(t, err)
+		require.Equal(t, createResp.User.Meta.Id, meResp.User.Meta.Id)
+		require.Equal(t, usersv1.ClusterRole_CLUSTER_ROLE_ADMIN, meResp.ClusterRole)
 
 		resolveResp, err := client.ResolveOrCreateUser(ctx, &usersv1.ResolveOrCreateUserRequest{
 			OidcSubject: subject,

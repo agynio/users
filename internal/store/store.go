@@ -174,6 +174,12 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 	return user, true, nil
 }
 
+func (s *Store) CountUsers(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count)
+	return count, err
+}
+
 func (s *Store) CreateUser(ctx context.Context, input UserInput) (User, error) {
 	identityID := uuid.New()
 	row := s.pool.QueryRow(ctx,

@@ -119,6 +119,17 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 	if err != nil {
 		return nil, toStatusError(err)
 	}
+	if created {
+		count, err := s.store.CountUsers(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "count users: %v", err)
+		}
+		if count == 1 {
+			if err := s.syncClusterRole(ctx, user.Meta.ID, usersv1.ClusterRole_CLUSTER_ROLE_ADMIN); err != nil {
+				return nil, status.Errorf(codes.Internal, "grant first user admin: %v", err)
+			}
+		}
+	}
 	return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 }
 
