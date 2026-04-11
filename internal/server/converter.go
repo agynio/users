@@ -44,3 +44,28 @@ func toProtoAPIToken(token store.APIToken) *usersv1.APIToken {
 		LastUsedAt:  lastUsedAt,
 	}
 }
+
+func toProtoDevice(device store.Device) *usersv1.Device {
+	return &usersv1.Device{
+		Meta: &usersv1.EntityMeta{
+			Id:        device.ID.String(),
+			CreatedAt: timestamppb.New(device.CreatedAt),
+			UpdatedAt: timestamppb.New(device.CreatedAt),
+		},
+		UserIdentityId:     device.IdentityID.String(),
+		Name:               device.Name,
+		OpenzitiIdentityId: device.OpenZitiIdentityID,
+		Status:             toProtoDeviceStatus(device.Status),
+	}
+}
+
+func toProtoDeviceStatus(status store.DeviceStatus) usersv1.DeviceStatus {
+	switch status {
+	case store.DeviceStatusPending:
+		return usersv1.DeviceStatus_DEVICE_STATUS_PENDING
+	case store.DeviceStatusEnrolled:
+		return usersv1.DeviceStatus_DEVICE_STATUS_ENROLLED
+	default:
+		panic("unsupported device status: " + string(status))
+	}
+}
