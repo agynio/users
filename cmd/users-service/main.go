@@ -13,6 +13,7 @@ import (
 	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
 	identityv1 "github.com/agynio/users/.gen/go/agynio/api/identity/v1"
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
+	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -64,11 +65,18 @@ func run() error {
 	}
 	defer identityConn.Close()
 
+	zitiConn, err := grpc.NewClient(cfg.ZitiManagementAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("connect to ziti management: %w", err)
+	}
+	defer zitiConn.Close()
+
 	grpcServer := grpc.NewServer()
 	serverInstance := server.New(
 		store.New(pool),
 		authorizationv1.NewAuthorizationServiceClient(authConn),
 		identityv1.NewIdentityServiceClient(identityConn),
+		zitimanagementv1.NewZitiManagementServiceClient(zitiConn),
 	)
 	usersv1.RegisterUsersServiceServer(grpcServer, serverInstance)
 

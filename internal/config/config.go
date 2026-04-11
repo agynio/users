@@ -6,10 +6,11 @@ import (
 )
 
 type Config struct {
-	GRPCAddress          string
-	DatabaseURL          string
-	AuthorizationAddress string
-	IdentityAddress      string
+	GRPCAddress           string
+	DatabaseURL           string
+	AuthorizationAddress  string
+	IdentityAddress       string
+	ZitiManagementAddress string
 }
 
 func FromEnv() (Config, error) {
@@ -29,6 +30,10 @@ func FromEnv() (Config, error) {
 	cfg.IdentityAddress = os.Getenv("IDENTITY_ADDRESS")
 	if cfg.IdentityAddress == "" {
 		cfg.IdentityAddress = "identity:50051"
+	}
+	cfg.ZitiManagementAddress = os.Getenv("ZITI_MANAGEMENT_ADDRESS")
+	if cfg.ZitiManagementAddress == "" {
+		cfg.ZitiManagementAddress = "ziti-management:50051"
 	}
 	return cfg, nil
 }

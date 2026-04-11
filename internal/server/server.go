@@ -9,6 +9,7 @@ import (
 	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
 	identityv1 "github.com/agynio/users/.gen/go/agynio/api/identity/v1"
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
+	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/users/internal/apitoken"
 	"github.com/agynio/users/internal/store"
 	"github.com/google/uuid"
@@ -25,13 +26,24 @@ const (
 
 type Server struct {
 	usersv1.UnimplementedUsersServiceServer
-	store               *store.Store
-	authorizationClient authorizationv1.AuthorizationServiceClient
-	identityClient      identityv1.IdentityServiceClient
+	store                *store.Store
+	authorizationClient  authorizationv1.AuthorizationServiceClient
+	identityClient       identityv1.IdentityServiceClient
+	zitiManagementClient zitimanagementv1.ZitiManagementServiceClient
 }
 
-func New(store *store.Store, authorizationClient authorizationv1.AuthorizationServiceClient, identityClient identityv1.IdentityServiceClient) *Server {
-	return &Server{store: store, authorizationClient: authorizationClient, identityClient: identityClient}
+func New(
+	store *store.Store,
+	authorizationClient authorizationv1.AuthorizationServiceClient,
+	identityClient identityv1.IdentityServiceClient,
+	zitiManagementClient zitimanagementv1.ZitiManagementServiceClient,
+) *Server {
+	return &Server{
+		store:                store,
+		authorizationClient:  authorizationClient,
+		identityClient:       identityClient,
+		zitiManagementClient: zitiManagementClient,
+	}
 }
 
 func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
@@ -351,6 +363,95 @@ func (s *Server) ResolveAPIToken(ctx context.Context, req *usersv1.ResolveAPITok
 		IdentityId: token.IdentityID.String(),
 		Token:      toProtoAPIToken(token),
 	}, nil
+}
+
+func (s *Server) CreateDevice(ctx context.Context, req *usersv1.CreateDeviceRequest) (*usersv1.CreateDeviceResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity not available: %v", err)
+	}
+
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "name must be provided")
+	}
+
+	zitiResponse, err := s.zitiManagementClient.CreateDeviceIdentity(ctx, &zitimanagementv1.CreateDeviceIdentityRequest{
+		UserIdentityId: identityID.String(),
+		Name:           name,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "create device identity: %v", err)
+	}
+	zitiIdentityID := zitiResponse.GetZitiIdentityId()
+	if zitiIdentityID == "" {
+		return nil, status.Error(codes.Internal, "create device identity: missing ziti identity id")
+	}
+	enrollmentJWT := zitiResponse.GetEnrollmentJwt()
+	if enrollmentJWT == "" {
+		return nil, status.Error(codes.Internal, "create device identity: missing enrollment jwt")
+	}
+
+	device, err := s.store.CreateDevice(ctx, store.CreateDeviceInput{
+		IdentityID:         identityID,
+		Name:               name,
+		OpenZitiIdentityID: zitiIdentityID,
+		EnrollmentJWT:      enrollmentJWT,
+	})
+	if err != nil {
+		_, _ = s.zitiManagementClient.DeleteDeviceIdentity(ctx, &zitimanagementv1.DeleteDeviceIdentityRequest{
+			ZitiIdentityId: zitiIdentityID,
+		})
+		return nil, toStatusError(err)
+	}
+
+	return &usersv1.CreateDeviceResponse{
+		Device:        toProtoDevice(device),
+		EnrollmentJwt: enrollmentJWT,
+	}, nil
+}
+
+func (s *Server) ListDevices(ctx context.Context, req *usersv1.ListDevicesRequest) (*usersv1.ListDevicesResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity not available: %v", err)
+	}
+
+	cursor, err := decodePageCursor(req.GetPageToken())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid page_token: %v", err)
+	}
+
+	result, err := s.store.ListDevices(ctx, identityID, req.GetPageSize(), cursor)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	devices, nextToken := mapListResult(result.Devices, result.NextCursor, toProtoDevice)
+	return &usersv1.ListDevicesResponse{Devices: devices, NextPageToken: nextToken}, nil
+}
+
+func (s *Server) DeleteDevice(ctx context.Context, req *usersv1.DeleteDeviceRequest) (*usersv1.DeleteDeviceResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity not available: %v", err)
+	}
+
+	deviceID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+
+	device, err := s.store.DeleteDevice(ctx, identityID, deviceID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	_, _ = s.zitiManagementClient.DeleteDeviceIdentity(ctx, &zitimanagementv1.DeleteDeviceIdentityRequest{
+		ZitiIdentityId: device.OpenZitiIdentityID,
+	})
+
+	return &usersv1.DeleteDeviceResponse{}, nil
 }
 
 func (s *Server) GetMe(ctx context.Context, _ *usersv1.GetMeRequest) (*usersv1.GetMeResponse, error) {

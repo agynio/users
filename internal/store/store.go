@@ -16,6 +16,7 @@ import (
 const (
 	userColumns     = `identity_id, oidc_subject, name, email, nickname, photo_url, created_at, updated_at`
 	apiTokenColumns = `id, identity_id, name, token_hash, token_prefix, expires_at, created_at, last_used_at`
+	deviceColumns   = `id, identity_id, name, openziti_identity_id, enrollment_jwt, status, created_at`
 )
 
 type EntityMeta struct {
@@ -64,12 +65,41 @@ type APIToken struct {
 	LastUsedAt  *time.Time
 }
 
+type DeviceStatus string
+
+const (
+	DeviceStatusPending  DeviceStatus = "pending"
+	DeviceStatusEnrolled DeviceStatus = "enrolled"
+)
+
 type CreateAPITokenInput struct {
 	IdentityID  uuid.UUID
 	Name        string
 	TokenHash   string
 	TokenPrefix string
 	ExpiresAt   *time.Time
+}
+
+type Device struct {
+	ID                 uuid.UUID
+	IdentityID         uuid.UUID
+	Name               string
+	OpenZitiIdentityID string
+	EnrollmentJWT      *string
+	Status             DeviceStatus
+	CreatedAt          time.Time
+}
+
+type CreateDeviceInput struct {
+	IdentityID         uuid.UUID
+	Name               string
+	OpenZitiIdentityID string
+	EnrollmentJWT      string
+}
+
+type DeviceListResult struct {
+	Devices    []Device
+	NextCursor *PageCursor
 }
 
 type Store struct {
@@ -122,6 +152,35 @@ func scanAPIToken(row pgx.Row) (APIToken, error) {
 		token.LastUsedAt = &value
 	}
 	return token, nil
+}
+
+func scanDevice(row pgx.Row) (Device, error) {
+	var device Device
+	var enrollmentJWT pgtype.Text
+	var status string
+	if err := row.Scan(
+		&device.ID,
+		&device.IdentityID,
+		&device.Name,
+		&device.OpenZitiIdentityID,
+		&enrollmentJWT,
+		&status,
+		&device.CreatedAt,
+	); err != nil {
+		return Device{}, err
+	}
+	if enrollmentJWT.Valid {
+		value := enrollmentJWT.String
+		device.EnrollmentJWT = &value
+	}
+	deviceStatus := DeviceStatus(status)
+	switch deviceStatus {
+	case DeviceStatusPending, DeviceStatusEnrolled:
+		device.Status = deviceStatus
+	default:
+		return Device{}, fmt.Errorf("unsupported device status %q", status)
+	}
+	return device, nil
 }
 
 func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User, bool, error) {
@@ -405,4 +464,55 @@ func (s *Store) ResolveAPIToken(ctx context.Context, tokenHash string) (APIToken
 	}
 
 	return apiToken, nil
+}
+
+func (s *Store) CreateDevice(ctx context.Context, input CreateDeviceInput) (Device, error) {
+	row := s.pool.QueryRow(ctx,
+		fmt.Sprintf(`INSERT INTO user_devices (identity_id, name, openziti_identity_id, enrollment_jwt, status)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING %s`, deviceColumns),
+		input.IdentityID,
+		input.Name,
+		input.OpenZitiIdentityID,
+		input.EnrollmentJWT,
+		DeviceStatusPending,
+	)
+	device, err := scanDevice(row)
+	if err != nil {
+		return Device{}, err
+	}
+	return device, nil
+}
+
+func (s *Store) ListDevices(ctx context.Context, identityID uuid.UUID, pageSize int32, cursor *PageCursor) (DeviceListResult, error) {
+	devices, nextCursor, err := listEntities(ctx, s.pool,
+		fmt.Sprintf("SELECT %s FROM user_devices", deviceColumns),
+		"id",
+		[]string{"identity_id = $1"},
+		[]any{identityID},
+		cursor,
+		pageSize,
+		scanDevice,
+		func(device Device) uuid.UUID { return device.ID },
+	)
+	if err != nil {
+		return DeviceListResult{}, err
+	}
+	return DeviceListResult{Devices: devices, NextCursor: nextCursor}, nil
+}
+
+func (s *Store) DeleteDevice(ctx context.Context, identityID uuid.UUID, deviceID uuid.UUID) (Device, error) {
+	row := s.pool.QueryRow(ctx,
+		fmt.Sprintf(`DELETE FROM user_devices WHERE id = $1 AND identity_id = $2 RETURNING %s`, deviceColumns),
+		deviceID,
+		identityID,
+	)
+	device, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Device{}, NotFound("device")
+		}
+		return Device{}, err
+	}
+	return device, nil
 }
