@@ -122,26 +122,43 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 	if oidcSubject == "" {
 		return nil, status.Error(codes.InvalidArgument, "oidc_subject must be provided")
 	}
-	user, created, err := s.store.ResolveOrCreateUser(ctx, store.UserInput{
+	baseUsername := deriveUsernameBase(req.GetPreferredUsername(), req.GetEmail(), req.GetName(), oidcSubject)
+	iterator := newUsernameCandidateIterator(baseUsername)
+
+	input := store.UserInput{
 		OIDCSubject: oidcSubject,
 		Name:        req.GetName(),
 		Email:       req.GetEmail(),
 		PhotoURL:    req.GetPhotoUrl(),
-	})
-	if err != nil {
-		return nil, toStatusError(err)
 	}
-	if created {
-		_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
-			IdentityId:   user.Meta.ID.String(),
-			IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER,
-		})
+	for {
+		candidate, ok, err := iterator.Next()
 		if err != nil {
-			_ = s.store.DeleteUser(ctx, user.Meta.ID)
-			return nil, status.Errorf(codes.Internal, "register identity: %v", err)
+			return nil, status.Errorf(codes.Internal, "derive username: %v", err)
 		}
+		if !ok {
+			return nil, status.Error(codes.Internal, "allocate username")
+		}
+		input.Username = candidate
+		user, created, err := s.store.ResolveOrCreateUser(ctx, input)
+		if err != nil {
+			if isAlreadyExists(err, "username") {
+				continue
+			}
+			return nil, toStatusError(err)
+		}
+		if created {
+			_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
+				IdentityId:   user.Meta.ID.String(),
+				IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER,
+			})
+			if err != nil {
+				_ = s.store.DeleteUser(ctx, user.Meta.ID)
+				return nil, status.Errorf(codes.Internal, "register identity: %v", err)
+			}
+		}
+		return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 	}
-	return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 }
 
 func (s *Server) GetUser(ctx context.Context, req *usersv1.GetUserRequest) (*usersv1.GetUserResponse, error) {
@@ -217,7 +234,7 @@ func (s *Server) UpdateUser(ctx context.Context, req *usersv1.UpdateUserRequest)
 			return nil, status.Errorf(codes.InvalidArgument, "cluster_role: %v", err)
 		}
 	}
-	if req.Name == nil && req.Email == nil && req.Nickname == nil && req.PhotoUrl == nil && req.ClusterRole == nil {
+	if req.Name == nil && req.Email == nil && req.Nickname == nil && req.PhotoUrl == nil && req.ClusterRole == nil && req.Username == nil {
 		return nil, status.Error(codes.InvalidArgument, "at least one field must be provided")
 	}
 
@@ -241,6 +258,14 @@ func (s *Server) UpdateUser(ctx context.Context, req *usersv1.UpdateUserRequest)
 	if req.PhotoUrl != nil {
 		value := req.GetPhotoUrl()
 		update.PhotoURL = &value
+		updateUser = true
+	}
+	if req.Username != nil {
+		value := req.GetUsername()
+		if err := validateUsername(value); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "username: %v", err)
+		}
+		update.Username = &value
 		updateUser = true
 	}
 
@@ -470,6 +495,74 @@ func (s *Server) GetMe(ctx context.Context, _ *usersv1.GetMeRequest) (*usersv1.G
 	return &usersv1.GetMeResponse{User: toProtoUser(user), ClusterRole: clusterRole}, nil
 }
 
+func (s *Server) UpdateMe(ctx context.Context, req *usersv1.UpdateMeRequest) (*usersv1.UpdateMeResponse, error) {
+	identityID, err := identityIDFromContext(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity not available: %v", err)
+	}
+	if req.Name == nil && req.Username == nil {
+		return nil, status.Error(codes.InvalidArgument, "at least one field must be provided")
+	}
+
+	update := store.UserUpdate{}
+	if req.Name != nil {
+		value := req.GetName()
+		update.Name = &value
+	}
+	if req.Username != nil {
+		value := req.GetUsername()
+		if err := validateUsername(value); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "username: %v", err)
+		}
+		update.Username = &value
+	}
+
+	user, err := s.store.UpdateUser(ctx, identityID, update)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	clusterRole, err := s.resolveClusterRole(ctx, identityID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "authorization check: %v", err)
+	}
+	return &usersv1.UpdateMeResponse{User: toProtoUser(user), ClusterRole: clusterRole}, nil
+}
+
+func (s *Server) SearchUsers(ctx context.Context, req *usersv1.SearchUsersRequest) (*usersv1.SearchUsersResponse, error) {
+	if _, err := identityIDFromContext(ctx); err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity not available: %v", err)
+	}
+	prefix := req.GetPrefix()
+	if err := validateUsernamePrefix(prefix); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "prefix: %v", err)
+	}
+	limit := req.GetLimit()
+	if limit == 0 {
+		limit = usernameSearchDefault
+	}
+	if limit < 0 {
+		return nil, status.Error(codes.InvalidArgument, "limit must be positive")
+	}
+	if limit > usernameSearchMax {
+		return nil, status.Errorf(codes.InvalidArgument, "limit must be <= %d", usernameSearchMax)
+	}
+
+	entries, err := s.store.SearchUsers(ctx, prefix, limit)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	protoEntries := make([]*usersv1.UserDirectoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		protoEntries = append(protoEntries, &usersv1.UserDirectoryEntry{
+			IdentityId: entry.IdentityID.String(),
+			Username:   entry.Username,
+			Name:       entry.Name,
+			PhotoUrl:   entry.PhotoURL,
+		})
+	}
+	return &usersv1.SearchUsersResponse{Users: protoEntries}, nil
+}
+
 func (s *Server) ListUsers(ctx context.Context, req *usersv1.ListUsersRequest) (*usersv1.ListUsersResponse, error) {
 	if _, err := s.requireClusterAdmin(ctx); err != nil {
 		return nil, err
@@ -498,14 +591,50 @@ func (s *Server) CreateUser(ctx context.Context, req *usersv1.CreateUserRequest)
 		return nil, status.Errorf(codes.InvalidArgument, "cluster_role: %v", err)
 	}
 
-	user, err := s.store.CreateUser(ctx, store.UserInput{
+	input := store.UserInput{
 		OIDCSubject: oidcSubject,
 		Name:        req.GetName(),
 		Nickname:    req.GetNickname(),
 		PhotoURL:    req.GetPhotoUrl(),
-	})
-	if err != nil {
-		return nil, toStatusError(err)
+	}
+	var user store.User
+	var err error
+	if req.Username != nil {
+		value := req.GetUsername()
+		if err := validateUsername(value); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "username: %v", err)
+		}
+		input.Username = value
+		user, err = s.store.CreateUser(ctx, input)
+		if err != nil {
+			return nil, toStatusError(err)
+		}
+	} else {
+		baseUsername := deriveUsernameBase("", "", req.GetName(), oidcSubject)
+		iterator := newUsernameCandidateIterator(baseUsername)
+		created := false
+		for {
+			candidate, ok, err := iterator.Next()
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "derive username: %v", err)
+			}
+			if !ok {
+				return nil, status.Error(codes.Internal, "allocate username")
+			}
+			input.Username = candidate
+			user, err = s.store.CreateUser(ctx, input)
+			if err != nil {
+				if isAlreadyExists(err, "username") {
+					continue
+				}
+				return nil, toStatusError(err)
+			}
+			created = true
+			break
+		}
+		if !created {
+			return nil, status.Error(codes.Internal, "allocate username")
+		}
 	}
 
 	_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
@@ -624,4 +753,12 @@ func toStatusError(err error) error {
 		return status.Error(codes.AlreadyExists, exists.Error())
 	}
 	return status.Errorf(codes.Internal, "internal error: %v", err)
+}
+
+func isAlreadyExists(err error, resource string) bool {
+	var exists *store.AlreadyExistsError
+	if !errors.As(err, &exists) {
+		return false
+	}
+	return exists.Resource == resource
 }
