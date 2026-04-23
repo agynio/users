@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -433,11 +434,13 @@ func (s *Store) ListUsers(ctx context.Context, pageSize int32, cursor *PageCurso
 }
 
 func (s *Store) SearchUsers(ctx context.Context, prefix string, limit int32) ([]UserDirectoryEntry, error) {
+	pattern := escapeLikePattern(prefix) + "%"
 	rows, err := s.pool.Query(ctx,
 		`SELECT identity_id, username, name, photo_url FROM users
-        WHERE username IS NOT NULL AND username <> '' AND username LIKE $1 || '%'
-        ORDER BY (username = $1) DESC, username ASC
-        LIMIT $2`,
+		WHERE username IS NOT NULL AND username <> '' AND username LIKE $1 ESCAPE '\\'
+		ORDER BY (username = $2) DESC, username ASC
+		LIMIT $3`,
+		pattern,
 		prefix,
 		limit,
 	)
@@ -458,6 +461,11 @@ func (s *Store) SearchUsers(ctx context.Context, prefix string, limit int32) ([]
 		return nil, err
 	}
 	return entries, nil
+}
+
+func escapeLikePattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
 }
 
 func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {

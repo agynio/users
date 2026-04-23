@@ -123,10 +123,7 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 		return nil, status.Error(codes.InvalidArgument, "oidc_subject must be provided")
 	}
 	baseUsername := deriveUsernameBase(req.GetPreferredUsername(), req.GetEmail(), req.GetName(), oidcSubject)
-	candidates, err := usernameCandidates(baseUsername)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "derive username: %v", err)
-	}
+	iterator := newUsernameCandidateIterator(baseUsername)
 
 	input := store.UserInput{
 		OIDCSubject: oidcSubject,
@@ -134,7 +131,14 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 		Email:       req.GetEmail(),
 		PhotoURL:    req.GetPhotoUrl(),
 	}
-	for _, candidate := range candidates {
+	for {
+		candidate, ok, err := iterator.Next()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "derive username: %v", err)
+		}
+		if !ok {
+			return nil, status.Error(codes.Internal, "allocate username")
+		}
 		input.Username = candidate
 		user, created, err := s.store.ResolveOrCreateUser(ctx, input)
 		if err != nil {
@@ -155,7 +159,6 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 		}
 		return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 	}
-	return nil, status.Error(codes.Internal, "allocate username")
 }
 
 func (s *Server) GetUser(ctx context.Context, req *usersv1.GetUserRequest) (*usersv1.GetUserResponse, error) {
@@ -608,12 +611,16 @@ func (s *Server) CreateUser(ctx context.Context, req *usersv1.CreateUserRequest)
 		}
 	} else {
 		baseUsername := deriveUsernameBase("", "", req.GetName(), oidcSubject)
-		candidates, err := usernameCandidates(baseUsername)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "derive username: %v", err)
-		}
+		iterator := newUsernameCandidateIterator(baseUsername)
 		created := false
-		for _, candidate := range candidates {
+		for {
+			candidate, ok, err := iterator.Next()
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "derive username: %v", err)
+			}
+			if !ok {
+				return nil, status.Error(codes.Internal, "allocate username")
+			}
 			input.Username = candidate
 			user, err = s.store.CreateUser(ctx, input)
 			if err != nil {

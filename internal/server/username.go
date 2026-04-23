@@ -107,21 +107,39 @@ func emailLocalPart(email string) string {
 	return parts[0]
 }
 
-func usernameCandidates(base string) ([]string, error) {
-	candidates := make([]string, 0, 1+(usernameNumericSuffixMax-1)+usernameRandomSuffixTries)
-	candidates = append(candidates, base)
-	for i := 2; i <= usernameNumericSuffixMax; i++ {
-		suffix := fmt.Sprintf("-%d", i)
-		candidates = append(candidates, usernameWithSuffix(base, suffix))
+type usernameCandidateIterator struct {
+	base            string
+	nextIndex       int
+	randomGenerated int
+	randomSuffix    func(int) (string, error)
+}
+
+func newUsernameCandidateIterator(base string) *usernameCandidateIterator {
+	return &usernameCandidateIterator{
+		base:         base,
+		randomSuffix: randomUsernameSuffix,
 	}
-	for i := 0; i < usernameRandomSuffixTries; i++ {
-		suffix, err := randomUsernameSuffix(usernameRandomSuffixLen)
+}
+
+func (iter *usernameCandidateIterator) Next() (string, bool, error) {
+	if iter.nextIndex == 0 {
+		iter.nextIndex++
+		return iter.base, true, nil
+	}
+	if iter.nextIndex < usernameNumericSuffixMax {
+		suffix := fmt.Sprintf("-%d", iter.nextIndex+1)
+		iter.nextIndex++
+		return usernameWithSuffix(iter.base, suffix), true, nil
+	}
+	if iter.randomGenerated < usernameRandomSuffixTries {
+		suffix, err := iter.randomSuffix(usernameRandomSuffixLen)
 		if err != nil {
-			return nil, err
+			return "", false, err
 		}
-		candidates = append(candidates, usernameWithSuffix(base, "-"+suffix))
+		iter.randomGenerated++
+		return usernameWithSuffix(iter.base, "-"+suffix), true, nil
 	}
-	return candidates, nil
+	return "", false, nil
 }
 
 func usernameWithSuffix(base, suffix string) string {
