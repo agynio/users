@@ -437,7 +437,7 @@ func (s *Store) SearchUsers(ctx context.Context, prefix string, limit int32) ([]
 	pattern := escapeLikePattern(prefix) + "%"
 	rows, err := s.pool.Query(ctx,
 		`SELECT identity_id, username, name, photo_url FROM users
-		WHERE username IS NOT NULL AND username <> '' AND username LIKE $1 ESCAPE '\\'
+		WHERE username IS NOT NULL AND username <> '' AND username LIKE $1
 		ORDER BY (username = $2) DESC, username ASC
 		LIMIT $3`,
 		pattern,
