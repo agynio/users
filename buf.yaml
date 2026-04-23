@@ -1,4 +1,4 @@
 version: v1
 
 deps:
-  - buf.build/agynio/api
+  - buf.build/agynio/api:74e093945d7343239e9933d5de061836

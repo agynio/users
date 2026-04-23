@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	userColumns     = `identity_id, oidc_subject, name, email, nickname, photo_url, created_at, updated_at`
+	userColumns     = `identity_id, oidc_subject, name, email, nickname, username, photo_url, created_at, updated_at`
 	apiTokenColumns = `id, identity_id, name, token_hash, token_prefix, expires_at, created_at, last_used_at`
 	deviceColumns   = `id, identity_id, name, openziti_identity_id, enrollment_jwt, status, created_at`
 )
@@ -31,6 +31,7 @@ type User struct {
 	Name        string
 	Email       string
 	Nickname    string
+	Username    string
 	PhotoURL    string
 }
 
@@ -39,6 +40,7 @@ type UserInput struct {
 	Name        string
 	Email       string
 	Nickname    string
+	Username    string
 	PhotoURL    string
 }
 
@@ -46,12 +48,20 @@ type UserUpdate struct {
 	Name     *string
 	Email    *string
 	Nickname *string
+	Username *string
 	PhotoURL *string
 }
 
 type UserListResult struct {
 	Users      []User
 	NextCursor *PageCursor
+}
+
+type UserDirectoryEntry struct {
+	IdentityID uuid.UUID
+	Username   string
+	Name       string
+	PhotoURL   string
 }
 
 type APIToken struct {
@@ -112,19 +122,37 @@ func New(pool *pgxpool.Pool) *Store {
 
 func scanUser(row pgx.Row) (User, error) {
 	var user User
+	var username pgtype.Text
 	if err := row.Scan(
 		&user.Meta.ID,
 		&user.OIDCSubject,
 		&user.Name,
 		&user.Email,
 		&user.Nickname,
+		&username,
 		&user.PhotoURL,
 		&user.Meta.CreatedAt,
 		&user.Meta.UpdatedAt,
 	); err != nil {
 		return User{}, err
 	}
+	if username.Valid {
+		user.Username = username.String
+	}
 	return user, nil
+}
+
+func scanUserDirectoryEntry(row pgx.Row) (UserDirectoryEntry, error) {
+	var entry UserDirectoryEntry
+	if err := row.Scan(
+		&entry.IdentityID,
+		&entry.Username,
+		&entry.Name,
+		&entry.PhotoURL,
+	); err != nil {
+		return UserDirectoryEntry{}, err
+	}
+	return entry, nil
 }
 
 func scanAPIToken(row pgx.Row) (APIToken, error) {
@@ -198,32 +226,40 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 
 	identityID := uuid.New()
 	row = s.pool.QueryRow(ctx,
-		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, photo_url)
-        VALUES ($1, $2, $3, $4, $5, $6)
+		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, username, photo_url)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING %s`, userColumns),
 		identityID,
 		input.OIDCSubject,
 		input.Name,
 		input.Email,
 		input.Nickname,
+		input.Username,
 		input.PhotoURL,
 	)
 	user, err = scanUser(row)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			row = s.pool.QueryRow(ctx,
-				fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
-				input.OIDCSubject,
-			)
-			user, err = scanUser(row)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return User{}, false, NotFound("user")
+			switch pgErr.ConstraintName {
+			case "users_username_idx":
+				return User{}, false, AlreadyExists("username")
+			case "users_oidc_subject_idx":
+				row = s.pool.QueryRow(ctx,
+					fmt.Sprintf(`SELECT %s FROM users WHERE oidc_subject = $1`, userColumns),
+					input.OIDCSubject,
+				)
+				user, err = scanUser(row)
+				if err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return User{}, false, NotFound("user")
+					}
+					return User{}, false, err
 				}
-				return User{}, false, err
+				return user, false, nil
+			default:
+				return User{}, false, AlreadyExists("user")
 			}
-			return user, false, nil
 		}
 		return User{}, false, err
 	}
@@ -236,21 +272,29 @@ func (s *Store) ResolveOrCreateUser(ctx context.Context, input UserInput) (User,
 func (s *Store) CreateUser(ctx context.Context, input UserInput) (User, error) {
 	identityID := uuid.New()
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, photo_url)
-        VALUES ($1, $2, $3, $4, $5, $6)
+		fmt.Sprintf(`INSERT INTO users (identity_id, oidc_subject, name, email, nickname, username, photo_url)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING %s`, userColumns),
 		identityID,
 		input.OIDCSubject,
 		input.Name,
 		input.Email,
 		input.Nickname,
+		input.Username,
 		input.PhotoURL,
 	)
 	user, err := scanUser(row)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return User{}, AlreadyExists("user")
+			switch pgErr.ConstraintName {
+			case "users_username_idx":
+				return User{}, AlreadyExists("username")
+			case "users_oidc_subject_idx":
+				return User{}, AlreadyExists("user")
+			default:
+				return User{}, AlreadyExists("user")
+			}
 		}
 		return User{}, err
 	}
@@ -331,6 +375,9 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 	if update.Nickname != nil {
 		builder.add("nickname", *update.Nickname)
 	}
+	if update.Username != nil {
+		builder.add("username", *update.Username)
+	}
 	if update.PhotoURL != nil {
 		builder.add("photo_url", *update.PhotoURL)
 	}
@@ -344,6 +391,13 @@ func (s *Store) UpdateUser(ctx context.Context, id uuid.UUID, update UserUpdate)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, NotFound("user")
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if pgErr.ConstraintName == "users_username_idx" {
+				return User{}, AlreadyExists("username")
+			}
+			return User{}, AlreadyExists("user")
 		}
 		return User{}, err
 	}
@@ -376,6 +430,34 @@ func (s *Store) ListUsers(ctx context.Context, pageSize int32, cursor *PageCurso
 		return UserListResult{}, err
 	}
 	return UserListResult{Users: users, NextCursor: nextCursor}, nil
+}
+
+func (s *Store) SearchUsers(ctx context.Context, prefix string, limit int32) ([]UserDirectoryEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT identity_id, username, name, photo_url FROM users
+        WHERE username IS NOT NULL AND username <> '' AND username LIKE $1 || '%'
+        ORDER BY (username = $1) DESC, username ASC
+        LIMIT $2`,
+		prefix,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := []UserDirectoryEntry{}
+	for rows.Next() {
+		entry, err := scanUserDirectoryEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {
