@@ -56,6 +56,9 @@ functions:
               volumeMounts:
                 - name: data
                   mountPath: /opt/app/data
+              livenessProbe: null
+              readinessProbe: null
+              startupProbe: null
               resources:
                 requests:
                   cpu: 500m
