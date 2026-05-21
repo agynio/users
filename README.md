@@ -29,10 +29,12 @@ devspace dev
 devspace dev -w
 ```
 
-### Run tests
+### Run E2E tests
 
 ```bash
-devspace run test:e2e
+git clone https://github.com/agynio/e2e.git
+cd e2e
+devspace run test-e2e --tag svc_users
 ```
 
 See [E2E Testing](https://github.com/agynio/architecture/blob/main/architecture/operations/e2e-testing.md).
