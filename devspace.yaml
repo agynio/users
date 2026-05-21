@@ -26,7 +26,7 @@ functions:
     fi
   patch_deployment: |-
     echo "Patching users deployment for DevSpace..."
-    kubectl patch deployment users-users -n ${USERS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    kubectl patch deployment users -n ${USERS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
     spec:
       template:
         spec:
