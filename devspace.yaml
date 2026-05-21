@@ -91,8 +91,8 @@ pipelines:
       if [ "$(get_flag "watch")" == "true" ]; then
         start_dev --disable-pod-replace users
       else
+        kubectl rollout status deployment/users -n ${USERS_NAMESPACE} --timeout=180s
         start_dev --disable-pod-replace users &
-        DEVSPACE_PID=$!
         echo "Waiting for users to be healthy on :50051..."
         healthy=false
         for i in $(seq 1 60); do
@@ -104,13 +104,11 @@ pipelines:
         done
         if [ "$healthy" != "true" ]; then
           stop_dev users || true
-          wait "$DEVSPACE_PID" || true
           echo "ERROR: Users did not become healthy within 120s" >&2
           exit 1
         fi
         echo "Dev environment ready. Stopping dev session."
         stop_dev users
-        wait "$DEVSPACE_PID" || true
       fi
 
 hooks:
