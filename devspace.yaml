@@ -91,22 +91,26 @@ pipelines:
       if [ "$(get_flag "watch")" == "true" ]; then
         start_dev --disable-pod-replace users
       else
-        start_dev --disable-pod-replace users
+        start_dev --disable-pod-replace users &
+        DEVSPACE_PID=$!
         echo "Waiting for users to be healthy on :50051..."
         healthy=false
         for i in $(seq 1 60); do
-          if exec_container --label-selector=app.kubernetes.io/name=users -n ${USERS_NAMESPACE} -- bash -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
+          if kubectl exec deploy/users -n ${USERS_NAMESPACE} -c users -- sh -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
             healthy=true
             break
           fi
           sleep 2
         done
         if [ "$healthy" != "true" ]; then
+          stop_dev users || true
+          wait "$DEVSPACE_PID" || true
           echo "ERROR: Users did not become healthy within 120s" >&2
           exit 1
         fi
         echo "Dev environment ready. Stopping dev session."
         stop_dev users
+        wait "$DEVSPACE_PID" || true
       fi
 
 hooks:
