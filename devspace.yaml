@@ -96,7 +96,7 @@ pipelines:
         echo "Waiting for users to be healthy on :50051..."
         healthy=false
         for i in $(seq 1 120); do
-          if kubectl exec deploy/users -n ${USERS_NAMESPACE} -c users -- sh -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
+          if kubectl exec deploy/users -n ${USERS_NAMESPACE} -c users -- bash -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
             healthy=true
             break
           fi
