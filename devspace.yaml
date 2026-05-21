@@ -135,16 +135,22 @@ dev:
               - .git/
               - .devspace/
               - /.gen/
+              - /bootstrap/
+              - /e2e/
               - /tmp/
             uploadExcludePaths:
               - .git/
               - .devspace/
               - /.gen/
+              - /bootstrap/
+              - /e2e/
               - /tmp/
             downloadExcludePaths:
               - .git/
               - .devspace/
               - /.gen/
+              - /bootstrap/
+              - /e2e/
               - /tmp/
         logs:
           enabled: true
