@@ -95,7 +95,7 @@ pipelines:
         start_dev --disable-pod-replace users &
         echo "Waiting for users to be healthy on :50051..."
         healthy=false
-        for i in $(seq 1 60); do
+        for i in $(seq 1 120); do
           if kubectl exec deploy/users -n ${USERS_NAMESPACE} -c users -- sh -c 'nc -z localhost 50051 >/dev/null 2>&1 || (echo > /dev/tcp/localhost/50051) >/dev/null 2>&1'; then
             healthy=true
             break
@@ -104,7 +104,7 @@ pipelines:
         done
         if [ "$healthy" != "true" ]; then
           stop_dev users || true
-          echo "ERROR: Users did not become healthy within 120s" >&2
+          echo "ERROR: Users did not become healthy within 240s" >&2
           exit 1
         fi
         echo "Dev environment ready. Stopping dev session."
