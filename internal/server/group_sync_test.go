@@ -1,0 +1,461 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"testing"
+	"time"
+
+	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
+	groupsv1 "github.com/agynio/users/.gen/go/agynio/api/groups/v1"
+	identityv1 "github.com/agynio/users/.gen/go/agynio/api/identity/v1"
+	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
+	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
+	"github.com/agynio/users/internal/store"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+)
+
+func TestCreateDeviceIncludesCurrentGroupAttributes(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	groupA := uuid.New().String()
+	groupB := uuid.New().String()
+	deviceID := uuid.New()
+	ziti := &fakeZitiManagementClient{createResponse: &zitimanagementv1.CreateDeviceIdentityResponse{
+		ZitiIdentityId: "ziti-device-1",
+		EnrollmentJwt:  "jwt-1",
+	}}
+	fakeStore := newFakeUserStore()
+	fakeStore.createDevice = storeDevice(deviceID, userID, "laptop", "ziti-device-1")
+	server := NewWithGroups(
+		fakeStore,
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		ziti,
+		&fakeGroupsClient{groupsByOrg: map[string][]*groupsv1.Group{
+			orgID.String(): {{Meta: &groupsv1.EntityMeta{Id: groupB}}, {Meta: &groupsv1.EntityMeta{Id: groupA}}, {Meta: &groupsv1.EntityMeta{Id: groupA}}},
+		}},
+	)
+
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-identity-id", userID.String()))
+	response, err := server.CreateDevice(ctx, &usersv1.CreateDeviceRequest{Name: "laptop"})
+	require.NoError(t, err)
+	require.Equal(t, deviceID.String(), response.GetDevice().GetMeta().GetId())
+	require.NotNil(t, ziti.createRequest)
+	require.Equal(t, userID.String(), ziti.createRequest.GetUserIdentityId())
+	require.Equal(t, "laptop", ziti.createRequest.GetName())
+	require.ElementsMatch(t, []string{groupRoleAttribute(groupA), groupRoleAttribute(groupB)}, ziti.createRequest.GetAdditionalRoleAttributes())
+}
+
+func TestGroupMembershipEventPatchesAllCurrentDevices(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	groupID := uuid.New().String()
+	fakeStore := newFakeUserStore()
+	fakeStore.devices[userID] = []store.Device{
+		storeDevice(uuid.New(), userID, "laptop", "ziti-device-1"),
+		storeDevice(uuid.New(), userID, "desktop", "ziti-device-2"),
+	}
+	ziti := &fakeZitiManagementClient{}
+	server := NewWithGroups(
+		fakeStore,
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		ziti,
+		&fakeGroupsClient{groupsByOrg: map[string][]*groupsv1.Group{orgID.String(): {{Meta: &groupsv1.EntityMeta{Id: groupID}}}}},
+	)
+	payload := mustMarshal(t, &groupsv1.GroupMembershipAddedEvent{
+		GroupId:    groupID,
+		MemberType: groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_USER,
+		MemberId:   userID.String(),
+	})
+
+	err := server.HandleGroupMembershipEvent(context.Background(), groupMembershipAddedSubject, payload)
+	require.NoError(t, err)
+	require.Len(t, ziti.patchRequests, 2)
+	require.ElementsMatch(t, []string{"ziti-device-1", "ziti-device-2"}, []string{
+		ziti.patchRequests[0].GetZitiIdentityId(),
+		ziti.patchRequests[1].GetZitiIdentityId(),
+	})
+	for _, request := range ziti.patchRequests {
+		require.Equal(t, []string{groupRoleAttribute(groupID)}, request.GetAdd())
+		require.Empty(t, request.GetRemove())
+	}
+}
+
+func TestGroupMembershipEventsAreDuplicateAndOutOfOrderSafe(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	groupID := uuid.New().String()
+	fakeStore := newFakeUserStore()
+	fakeStore.devices[userID] = []store.Device{storeDevice(uuid.New(), userID, "laptop", "ziti-device-1")}
+	ziti := &fakeZitiManagementClient{}
+	groups := &fakeGroupsClient{groupsByOrg: map[string][]*groupsv1.Group{orgID.String(): {}}}
+	server := NewWithGroups(
+		fakeStore,
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		ziti,
+		groups,
+	)
+	removed := mustMarshal(t, &groupsv1.GroupMembershipRemovedEvent{
+		GroupId:    groupID,
+		MemberType: groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_USER,
+		MemberId:   userID.String(),
+	})
+	added := mustMarshal(t, &groupsv1.GroupMembershipAddedEvent{
+		GroupId:    groupID,
+		MemberType: groupsv1.GroupMemberType_GROUP_MEMBER_TYPE_USER,
+		MemberId:   userID.String(),
+	})
+
+	require.NoError(t, server.HandleGroupMembershipEvent(context.Background(), groupMembershipRemovedSubject, removed))
+	require.NoError(t, server.HandleGroupMembershipEvent(context.Background(), groupMembershipRemovedSubject, removed))
+	require.NoError(t, server.HandleGroupMembershipEvent(context.Background(), groupMembershipAddedSubject, added))
+	require.Len(t, ziti.patchRequests, 3)
+	for _, request := range ziti.patchRequests {
+		require.Empty(t, request.GetAdd())
+		require.Equal(t, []string{groupRoleAttribute(groupID)}, request.GetRemove())
+	}
+
+	groups.groupsByOrg[orgID.String()] = []*groupsv1.Group{{Meta: &groupsv1.EntityMeta{Id: groupID}}}
+	require.NoError(t, server.HandleGroupMembershipEvent(context.Background(), groupMembershipAddedSubject, added))
+	lastRequest := ziti.patchRequests[len(ziti.patchRequests)-1]
+	require.Equal(t, []string{groupRoleAttribute(groupID)}, lastRequest.GetAdd())
+	require.Empty(t, lastRequest.GetRemove())
+}
+
+func TestReconcileAllUserDeviceGroupRolesPatchesMissingDesiredAttrs(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	groupID := uuid.New().String()
+	fakeStore := newFakeUserStore()
+	fakeStore.users = []store.User{{Meta: store.EntityMeta{ID: userID}}}
+	fakeStore.devices[userID] = []store.Device{storeDevice(uuid.New(), userID, "laptop", "ziti-device-1")}
+	ziti := &fakeZitiManagementClient{}
+	server := NewWithGroups(
+		fakeStore,
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		ziti,
+		&fakeGroupsClient{groupsByOrg: map[string][]*groupsv1.Group{orgID.String(): {{Meta: &groupsv1.EntityMeta{Id: groupID}}}}},
+	)
+
+	err := server.ReconcileAllUserDeviceGroupRoles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, ziti.patchRequests, 1)
+	require.Equal(t, "ziti-device-1", ziti.patchRequests[0].GetZitiIdentityId())
+	require.Equal(t, []string{groupRoleAttribute(groupID)}, ziti.patchRequests[0].GetAdd())
+	require.Empty(t, ziti.patchRequests[0].GetRemove())
+}
+
+func TestListUserGroupsPaginatesOrganizationsAndGroups(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	firstGroupID := uuid.New().String()
+	secondGroupID := uuid.New().String()
+	groups := &fakeGroupsClient{pagedGroupsByOrg: map[string][][]*groupsv1.Group{
+		orgID.String(): {{{Meta: &groupsv1.EntityMeta{Id: firstGroupID}}}, {{Meta: &groupsv1.EntityMeta{Id: secondGroupID}}}},
+	}}
+	server := NewWithGroups(
+		newFakeUserStore(),
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		&fakeZitiManagementClient{},
+		groups,
+	)
+
+	attrs, err := server.userGroupRoleAttributes(context.Background(), userID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{groupRoleAttribute(firstGroupID), groupRoleAttribute(secondGroupID)}, attrs)
+	require.Len(t, groups.requests, 2)
+	require.Empty(t, groups.requests[0].GetPageToken())
+	require.Equal(t, "page-1", groups.requests[1].GetPageToken())
+}
+
+func storeDevice(id uuid.UUID, userID uuid.UUID, name string, zitiIdentityID string) store.Device {
+	jwt := "jwt"
+	return store.Device{
+		ID:                 id,
+		IdentityID:         userID,
+		Name:               name,
+		OpenZitiIdentityID: zitiIdentityID,
+		EnrollmentJWT:      &jwt,
+		Status:             store.DeviceStatusPending,
+		CreatedAt:          time.Unix(1, 0),
+	}
+}
+
+func mustMarshal(t *testing.T, message proto.Message) []byte {
+	t.Helper()
+	data, err := proto.Marshal(message)
+	require.NoError(t, err)
+	return data
+}
+
+type fakeUserStore struct {
+	users        []store.User
+	devices      map[uuid.UUID][]store.Device
+	createDevice store.Device
+}
+
+func newFakeUserStore() *fakeUserStore {
+	return &fakeUserStore{devices: map[uuid.UUID][]store.Device{}}
+}
+
+func (s *fakeUserStore) ResolveOrCreateUser(context.Context, store.UserInput) (store.User, bool, error) {
+	panic("unexpected ResolveOrCreateUser")
+}
+
+func (s *fakeUserStore) CreateUser(context.Context, store.UserInput) (store.User, error) {
+	panic("unexpected CreateUser")
+}
+
+func (s *fakeUserStore) GetUser(context.Context, uuid.UUID) (store.User, error) {
+	panic("unexpected GetUser")
+}
+
+func (s *fakeUserStore) GetUserByOIDCSubject(context.Context, string) (store.User, error) {
+	panic("unexpected GetUserByOIDCSubject")
+}
+
+func (s *fakeUserStore) BatchGetUsers(context.Context, []uuid.UUID) ([]store.User, error) {
+	panic("unexpected BatchGetUsers")
+}
+
+func (s *fakeUserStore) UpdateUser(context.Context, uuid.UUID, store.UserUpdate) (store.User, error) {
+	panic("unexpected UpdateUser")
+}
+
+func (s *fakeUserStore) DeleteUser(context.Context, uuid.UUID) error {
+	panic("unexpected DeleteUser")
+}
+
+func (s *fakeUserStore) ListUsers(_ context.Context, pageSize int32, cursor *store.PageCursor) (store.UserListResult, error) {
+	start := 0
+	if cursor != nil {
+		for index, user := range s.users {
+			if user.Meta.ID == cursor.AfterID {
+				start = index + 1
+				break
+			}
+		}
+	}
+	end := start + int(pageSize)
+	if end > len(s.users) {
+		end = len(s.users)
+	}
+	result := store.UserListResult{Users: append([]store.User{}, s.users[start:end]...)}
+	if end < len(s.users) {
+		result.NextCursor = &store.PageCursor{AfterID: s.users[end-1].Meta.ID}
+	}
+	return result, nil
+}
+
+func (s *fakeUserStore) SearchUsers(context.Context, string, int32) ([]store.UserDirectoryEntry, error) {
+	panic("unexpected SearchUsers")
+}
+
+func (s *fakeUserStore) CreateAPIToken(context.Context, store.CreateAPITokenInput) (store.APIToken, error) {
+	panic("unexpected CreateAPIToken")
+}
+
+func (s *fakeUserStore) ListAPITokens(context.Context, uuid.UUID) ([]store.APIToken, error) {
+	panic("unexpected ListAPITokens")
+}
+
+func (s *fakeUserStore) RevokeAPIToken(context.Context, uuid.UUID, uuid.UUID) error {
+	panic("unexpected RevokeAPIToken")
+}
+
+func (s *fakeUserStore) ResolveAPIToken(context.Context, string) (store.APIToken, error) {
+	panic("unexpected ResolveAPIToken")
+}
+
+func (s *fakeUserStore) CreateDevice(_ context.Context, input store.CreateDeviceInput) (store.Device, error) {
+	device := s.createDevice
+	device.IdentityID = input.IdentityID
+	device.Name = input.Name
+	device.OpenZitiIdentityID = input.OpenZitiIdentityID
+	s.devices[input.IdentityID] = append(s.devices[input.IdentityID], device)
+	return device, nil
+}
+
+func (s *fakeUserStore) ListDevices(_ context.Context, identityID uuid.UUID, pageSize int32, cursor *store.PageCursor) (store.DeviceListResult, error) {
+	devices := s.devices[identityID]
+	sort.Slice(devices, func(i, j int) bool { return devices[i].ID.String() < devices[j].ID.String() })
+	start := 0
+	if cursor != nil {
+		for index, device := range devices {
+			if device.ID == cursor.AfterID {
+				start = index + 1
+				break
+			}
+		}
+	}
+	end := start + int(pageSize)
+	if end > len(devices) {
+		end = len(devices)
+	}
+	result := store.DeviceListResult{Devices: append([]store.Device{}, devices[start:end]...)}
+	if end < len(devices) {
+		result.NextCursor = &store.PageCursor{AfterID: devices[end-1].ID}
+	}
+	return result, nil
+}
+
+func (s *fakeUserStore) DeleteDevice(context.Context, uuid.UUID, uuid.UUID) (store.Device, error) {
+	panic("unexpected DeleteDevice")
+}
+
+type fakeAuthorizationClient struct {
+	authorizationv1.UnimplementedAuthorizationServiceServer
+	objects []string
+}
+
+func (c *fakeAuthorizationClient) Check(context.Context, *authorizationv1.CheckRequest, ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
+	return &authorizationv1.CheckResponse{Allowed: true}, nil
+}
+
+func (c *fakeAuthorizationClient) Write(context.Context, *authorizationv1.WriteRequest, ...grpc.CallOption) (*authorizationv1.WriteResponse, error) {
+	return &authorizationv1.WriteResponse{}, nil
+}
+
+func (c *fakeAuthorizationClient) ListObjects(context.Context, *authorizationv1.ListObjectsRequest, ...grpc.CallOption) (*authorizationv1.ListObjectsResponse, error) {
+	return &authorizationv1.ListObjectsResponse{Objects: c.objects}, nil
+}
+
+func (c *fakeAuthorizationClient) BatchCheck(context.Context, *authorizationv1.BatchCheckRequest, ...grpc.CallOption) (*authorizationv1.BatchCheckResponse, error) {
+	panic("unexpected BatchCheck")
+}
+
+func (c *fakeAuthorizationClient) Read(context.Context, *authorizationv1.ReadRequest, ...grpc.CallOption) (*authorizationv1.ReadResponse, error) {
+	panic("unexpected Read")
+}
+
+func (c *fakeAuthorizationClient) ListUsers(context.Context, *authorizationv1.ListUsersRequest, ...grpc.CallOption) (*authorizationv1.ListUsersResponse, error) {
+	panic("unexpected ListUsers")
+}
+
+type fakeIdentityClient struct{}
+
+func (c *fakeIdentityClient) RegisterIdentity(context.Context, *identityv1.RegisterIdentityRequest, ...grpc.CallOption) (*identityv1.RegisterIdentityResponse, error) {
+	return &identityv1.RegisterIdentityResponse{}, nil
+}
+
+func (c *fakeIdentityClient) GetIdentityType(context.Context, *identityv1.GetIdentityTypeRequest, ...grpc.CallOption) (*identityv1.GetIdentityTypeResponse, error) {
+	panic("unexpected GetIdentityType")
+}
+
+func (c *fakeIdentityClient) BatchGetIdentityTypes(context.Context, *identityv1.BatchGetIdentityTypesRequest, ...grpc.CallOption) (*identityv1.BatchGetIdentityTypesResponse, error) {
+	panic("unexpected BatchGetIdentityTypes")
+}
+
+func (c *fakeIdentityClient) SetNickname(context.Context, *identityv1.SetNicknameRequest, ...grpc.CallOption) (*identityv1.SetNicknameResponse, error) {
+	panic("unexpected SetNickname")
+}
+
+func (c *fakeIdentityClient) RemoveNickname(context.Context, *identityv1.RemoveNicknameRequest, ...grpc.CallOption) (*identityv1.RemoveNicknameResponse, error) {
+	panic("unexpected RemoveNickname")
+}
+
+func (c *fakeIdentityClient) ResolveNickname(context.Context, *identityv1.ResolveNicknameRequest, ...grpc.CallOption) (*identityv1.ResolveNicknameResponse, error) {
+	panic("unexpected ResolveNickname")
+}
+
+func (c *fakeIdentityClient) BatchGetNicknames(context.Context, *identityv1.BatchGetNicknamesRequest, ...grpc.CallOption) (*identityv1.BatchGetNicknamesResponse, error) {
+	panic("unexpected BatchGetNicknames")
+}
+
+type fakeZitiManagementClient struct {
+	createResponse *zitimanagementv1.CreateDeviceIdentityResponse
+	createRequest  *zitimanagementv1.CreateDeviceIdentityRequest
+	patchRequests  []*zitimanagementv1.PatchIdentityRoleAttributesRequest
+}
+
+func (c *fakeZitiManagementClient) CreateDeviceIdentity(_ context.Context, request *zitimanagementv1.CreateDeviceIdentityRequest, _ ...grpc.CallOption) (*zitimanagementv1.CreateDeviceIdentityResponse, error) {
+	c.createRequest = proto.Clone(request).(*zitimanagementv1.CreateDeviceIdentityRequest)
+	if c.createResponse == nil {
+		return nil, fmt.Errorf("missing create response")
+	}
+	return c.createResponse, nil
+}
+
+func (c *fakeZitiManagementClient) DeleteDeviceIdentity(context.Context, *zitimanagementv1.DeleteDeviceIdentityRequest, ...grpc.CallOption) (*zitimanagementv1.DeleteDeviceIdentityResponse, error) {
+	return &zitimanagementv1.DeleteDeviceIdentityResponse{}, nil
+}
+
+func (c *fakeZitiManagementClient) PatchIdentityRoleAttributes(_ context.Context, request *zitimanagementv1.PatchIdentityRoleAttributesRequest, _ ...grpc.CallOption) (*zitimanagementv1.PatchIdentityRoleAttributesResponse, error) {
+	c.patchRequests = append(c.patchRequests, proto.Clone(request).(*zitimanagementv1.PatchIdentityRoleAttributesRequest))
+	return &zitimanagementv1.PatchIdentityRoleAttributesResponse{}, nil
+}
+
+type fakeGroupsClient struct {
+	groupsByOrg      map[string][]*groupsv1.Group
+	pagedGroupsByOrg map[string][][]*groupsv1.Group
+	requests         []*groupsv1.ListMemberGroupsRequest
+}
+
+func (c *fakeGroupsClient) ListMemberGroups(_ context.Context, request *groupsv1.ListMemberGroupsRequest, _ ...grpc.CallOption) (*groupsv1.ListMemberGroupsResponse, error) {
+	c.requests = append(c.requests, proto.Clone(request).(*groupsv1.ListMemberGroupsRequest))
+	if c.pagedGroupsByOrg != nil {
+		pages := c.pagedGroupsByOrg[request.GetOrganizationId()]
+		pageIndex := 0
+		if request.GetPageToken() != "" {
+			_, err := fmt.Sscanf(request.GetPageToken(), "page-%d", &pageIndex)
+			if err != nil {
+				return nil, err
+			}
+		}
+		response := &groupsv1.ListMemberGroupsResponse{Groups: append([]*groupsv1.Group{}, pages[pageIndex]...)}
+		if pageIndex+1 < len(pages) {
+			response.NextPageToken = fmt.Sprintf("page-%d", pageIndex+1)
+		}
+		return response, nil
+	}
+	return &groupsv1.ListMemberGroupsResponse{Groups: append([]*groupsv1.Group{}, c.groupsByOrg[request.GetOrganizationId()]...)}, nil
+}
+
+func TestGroupMembershipConsumerLoopRetriesWithoutBlocking(t *testing.T) {
+	originalInitial := groupMembershipRetryInitial
+	originalMax := groupMembershipRetryMax
+	groupMembershipRetryInitial = time.Millisecond
+	groupMembershipRetryMax = time.Millisecond
+	defer func() {
+		groupMembershipRetryInitial = originalInitial
+		groupMembershipRetryMax = originalMax
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subscription := &fakeGroupMembershipSubscription{}
+	attempts := make(chan int, 3)
+	server := NewWithGroups(newFakeUserStore(), &fakeAuthorizationClient{}, &fakeIdentityClient{}, &fakeZitiManagementClient{}, nil)
+
+	server.StartGroupMembershipConsumerLoopWithSubscriber(ctx, func(context.Context) (groupMembershipSubscription, error) {
+		attempts <- len(attempts) + 1
+		if len(attempts) < 2 {
+			return nil, fmt.Errorf("nats unavailable")
+		}
+		return subscription, nil
+	})
+
+	require.Eventually(t, func() bool { return len(attempts) >= 2 }, time.Second, time.Millisecond)
+	require.False(t, subscription.unsubscribed)
+	cancel()
+	require.Eventually(t, func() bool { return subscription.unsubscribed }, time.Second, time.Millisecond)
+}
+
+type fakeGroupMembershipSubscription struct {
+	unsubscribed bool
+}
+
+func (s *fakeGroupMembershipSubscription) Unsubscribe() error {
+	s.unsubscribed = true
+	return nil
+}

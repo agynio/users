@@ -3,14 +3,19 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 type Config struct {
-	GRPCAddress           string
-	DatabaseURL           string
-	AuthorizationAddress  string
-	IdentityAddress       string
-	ZitiManagementAddress string
+	GRPCAddress            string
+	DatabaseURL            string
+	AuthorizationAddress   string
+	IdentityAddress        string
+	ZitiManagementAddress  string
+	GroupsAddress          string
+	NATSURL                string
+	GroupSyncDurable       string
+	ReconciliationInterval time.Duration
 }
 
 func FromEnv() (Config, error) {
@@ -35,5 +40,26 @@ func FromEnv() (Config, error) {
 	if cfg.ZitiManagementAddress == "" {
 		cfg.ZitiManagementAddress = "ziti-management:50051"
 	}
+	cfg.GroupsAddress = os.Getenv("GROUPS_ADDRESS")
+	if cfg.GroupsAddress == "" {
+		cfg.GroupsAddress = "groups:50051"
+	}
+	cfg.NATSURL = os.Getenv("NATS_URL")
+	if cfg.NATSURL == "" {
+		cfg.NATSURL = "nats://nats:4222"
+	}
+	cfg.GroupSyncDurable = os.Getenv("GROUP_SYNC_DURABLE")
+	if cfg.GroupSyncDurable == "" {
+		cfg.GroupSyncDurable = "users-group-sync"
+	}
+	reconciliationInterval := os.Getenv("GROUP_SYNC_RECONCILIATION_INTERVAL")
+	if reconciliationInterval == "" {
+		reconciliationInterval = "60s"
+	}
+	duration, err := time.ParseDuration(reconciliationInterval)
+	if err != nil {
+		return Config{}, fmt.Errorf("GROUP_SYNC_RECONCILIATION_INTERVAL: %w", err)
+	}
+	cfg.ReconciliationInterval = duration
 	return cfg, nil
 }

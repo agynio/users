@@ -7,12 +7,14 @@ import (
 	"time"
 
 	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
+	groupsv1 "github.com/agynio/users/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/users/.gen/go/agynio/api/identity/v1"
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
 	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/users/internal/apitoken"
 	"github.com/agynio/users/internal/store"
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -26,10 +28,40 @@ const (
 
 type Server struct {
 	usersv1.UnimplementedUsersServiceServer
-	store                *store.Store
+	store                userStore
 	authorizationClient  authorizationv1.AuthorizationServiceClient
 	identityClient       identityv1.IdentityServiceClient
-	zitiManagementClient zitimanagementv1.ZitiManagementServiceClient
+	zitiManagementClient zitiManagementClient
+	groupsClient         groupsClient
+}
+
+type userStore interface {
+	ResolveOrCreateUser(context.Context, store.UserInput) (store.User, bool, error)
+	CreateUser(context.Context, store.UserInput) (store.User, error)
+	GetUser(context.Context, uuid.UUID) (store.User, error)
+	GetUserByOIDCSubject(context.Context, string) (store.User, error)
+	BatchGetUsers(context.Context, []uuid.UUID) ([]store.User, error)
+	UpdateUser(context.Context, uuid.UUID, store.UserUpdate) (store.User, error)
+	DeleteUser(context.Context, uuid.UUID) error
+	ListUsers(context.Context, int32, *store.PageCursor) (store.UserListResult, error)
+	SearchUsers(context.Context, string, int32) ([]store.UserDirectoryEntry, error)
+	CreateAPIToken(context.Context, store.CreateAPITokenInput) (store.APIToken, error)
+	ListAPITokens(context.Context, uuid.UUID) ([]store.APIToken, error)
+	RevokeAPIToken(context.Context, uuid.UUID, uuid.UUID) error
+	ResolveAPIToken(context.Context, string) (store.APIToken, error)
+	CreateDevice(context.Context, store.CreateDeviceInput) (store.Device, error)
+	ListDevices(context.Context, uuid.UUID, int32, *store.PageCursor) (store.DeviceListResult, error)
+	DeleteDevice(context.Context, uuid.UUID, uuid.UUID) (store.Device, error)
+}
+
+type zitiManagementClient interface {
+	CreateDeviceIdentity(context.Context, *zitimanagementv1.CreateDeviceIdentityRequest, ...grpc.CallOption) (*zitimanagementv1.CreateDeviceIdentityResponse, error)
+	DeleteDeviceIdentity(context.Context, *zitimanagementv1.DeleteDeviceIdentityRequest, ...grpc.CallOption) (*zitimanagementv1.DeleteDeviceIdentityResponse, error)
+	PatchIdentityRoleAttributes(context.Context, *zitimanagementv1.PatchIdentityRoleAttributesRequest, ...grpc.CallOption) (*zitimanagementv1.PatchIdentityRoleAttributesResponse, error)
+}
+
+type groupsClient interface {
+	ListMemberGroups(context.Context, *groupsv1.ListMemberGroupsRequest, ...grpc.CallOption) (*groupsv1.ListMemberGroupsResponse, error)
 }
 
 func New(
@@ -38,11 +70,22 @@ func New(
 	identityClient identityv1.IdentityServiceClient,
 	zitiManagementClient zitimanagementv1.ZitiManagementServiceClient,
 ) *Server {
+	return NewWithGroups(store, authorizationClient, identityClient, zitiManagementClient, nil)
+}
+
+func NewWithGroups(
+	store userStore,
+	authorizationClient authorizationv1.AuthorizationServiceClient,
+	identityClient identityv1.IdentityServiceClient,
+	zitiManagementClient zitiManagementClient,
+	groupsClient groupsClient,
+) *Server {
 	return &Server{
 		store:                store,
 		authorizationClient:  authorizationClient,
 		identityClient:       identityClient,
 		zitiManagementClient: zitiManagementClient,
+		groupsClient:         groupsClient,
 	}
 }
 
@@ -401,9 +444,15 @@ func (s *Server) CreateDevice(ctx context.Context, req *usersv1.CreateDeviceRequ
 		return nil, status.Error(codes.InvalidArgument, "name must be provided")
 	}
 
+	groupRoleAttributes, err := s.userGroupRoleAttributes(ctx, identityID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list user group memberships: %v", err)
+	}
+
 	zitiResponse, err := s.zitiManagementClient.CreateDeviceIdentity(ctx, &zitimanagementv1.CreateDeviceIdentityRequest{
-		UserIdentityId: identityID.String(),
-		Name:           name,
+		UserIdentityId:           identityID.String(),
+		Name:                     name,
+		AdditionalRoleAttributes: groupRoleAttributes,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create device identity: %v", err)

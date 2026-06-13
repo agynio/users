@@ -81,6 +81,16 @@ env:
     value: "authorization:50051"
   - name: IDENTITY_ADDRESS
     value: "identity:50051"
+  - name: ZITI_MANAGEMENT_ADDRESS
+    value: "ziti-management:50051"
+  - name: GROUPS_ADDRESS
+    value: "groups:50051"
+  - name: NATS_URL
+    value: "nats://nats:4222"
+  - name: GROUP_SYNC_DURABLE
+    value: "users-group-sync"
+  - name: GROUP_SYNC_RECONCILIATION_INTERVAL
+    value: "60s"
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""
