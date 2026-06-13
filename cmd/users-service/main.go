@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
+	groupsv1 "github.com/agynio/users/.gen/go/agynio/api/groups/v1"
 	identityv1 "github.com/agynio/users/.gen/go/agynio/api/identity/v1"
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
 	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
@@ -71,14 +72,34 @@ func run() error {
 	}
 	defer zitiConn.Close()
 
+	groupsConn, err := grpc.NewClient(cfg.GroupsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("connect to groups: %w", err)
+	}
+	defer groupsConn.Close()
+
+	natsConn, err := server.ConnectNATS(cfg.NATSURL)
+	if err != nil {
+		return err
+	}
+	defer natsConn.Close()
+
 	grpcServer := grpc.NewServer()
-	serverInstance := server.New(
+	serverInstance := server.NewWithGroups(
 		store.New(pool),
 		authorizationv1.NewAuthorizationServiceClient(authConn),
 		identityv1.NewIdentityServiceClient(identityConn),
 		zitimanagementv1.NewZitiManagementServiceClient(zitiConn),
+		groupsv1.NewGroupsServiceClient(groupsConn),
 	)
 	usersv1.RegisterUsersServiceServer(grpcServer, serverInstance)
+
+	groupSubscription, err := serverInstance.StartGroupMembershipConsumer(natsConn, cfg.GroupSyncDurable)
+	if err != nil {
+		return err
+	}
+	defer groupSubscription.Unsubscribe()
+	serverInstance.StartGroupRoleReconciliation(ctx, cfg.ReconciliationInterval)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
