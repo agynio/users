@@ -420,3 +420,42 @@ func (c *fakeGroupsClient) ListMemberGroups(_ context.Context, request *groupsv1
 	}
 	return &groupsv1.ListMemberGroupsResponse{Groups: append([]*groupsv1.Group{}, c.groupsByOrg[request.GetOrganizationId()]...)}, nil
 }
+
+func TestGroupMembershipConsumerLoopRetriesWithoutBlocking(t *testing.T) {
+	originalInitial := groupMembershipRetryInitial
+	originalMax := groupMembershipRetryMax
+	groupMembershipRetryInitial = time.Millisecond
+	groupMembershipRetryMax = time.Millisecond
+	defer func() {
+		groupMembershipRetryInitial = originalInitial
+		groupMembershipRetryMax = originalMax
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	subscription := &fakeGroupMembershipSubscription{}
+	attempts := make(chan int, 3)
+	server := NewWithGroups(newFakeUserStore(), &fakeAuthorizationClient{}, &fakeIdentityClient{}, &fakeZitiManagementClient{}, nil)
+
+	server.StartGroupMembershipConsumerLoopWithSubscriber(ctx, func(context.Context) (groupMembershipSubscription, error) {
+		attempts <- len(attempts) + 1
+		if len(attempts) < 2 {
+			return nil, fmt.Errorf("nats unavailable")
+		}
+		return subscription, nil
+	})
+
+	require.Eventually(t, func() bool { return len(attempts) >= 2 }, time.Second, time.Millisecond)
+	require.False(t, subscription.unsubscribed)
+	cancel()
+	require.Eventually(t, func() bool { return subscription.unsubscribed }, time.Second, time.Millisecond)
+}
+
+type fakeGroupMembershipSubscription struct {
+	unsubscribed bool
+}
+
+func (s *fakeGroupMembershipSubscription) Unsubscribe() error {
+	s.unsubscribed = true
+	return nil
+}

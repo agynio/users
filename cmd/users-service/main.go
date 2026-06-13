@@ -78,12 +78,6 @@ func run() error {
 	}
 	defer groupsConn.Close()
 
-	natsConn, err := server.ConnectNATS(cfg.NATSURL)
-	if err != nil {
-		return err
-	}
-	defer natsConn.Close()
-
 	grpcServer := grpc.NewServer()
 	serverInstance := server.NewWithGroups(
 		store.New(pool),
@@ -94,11 +88,7 @@ func run() error {
 	)
 	usersv1.RegisterUsersServiceServer(grpcServer, serverInstance)
 
-	groupSubscription, err := serverInstance.StartGroupMembershipConsumer(natsConn, cfg.GroupSyncDurable)
-	if err != nil {
-		return err
-	}
-	defer groupSubscription.Unsubscribe()
+	serverInstance.StartGroupMembershipConsumerLoop(ctx, cfg.NATSURL, cfg.GroupSyncDurable)
 	serverInstance.StartGroupRoleReconciliation(ctx, cfg.ReconciliationInterval)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
