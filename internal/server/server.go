@@ -33,7 +33,11 @@ type Server struct {
 	identityClient       identityv1.IdentityServiceClient
 	zitiManagementClient zitiManagementClient
 	groupsClient         groupsClient
+	firstAdminEmail      string
 }
+
+// Option adjusts optional Server behavior at construction.
+type Option func(*Server)
 
 type userStore interface {
 	ResolveOrCreateUser(context.Context, store.UserInput) (store.User, bool, error)
@@ -45,6 +49,7 @@ type userStore interface {
 	DeleteUser(context.Context, uuid.UUID) error
 	ListUsers(context.Context, int32, *store.PageCursor) (store.UserListResult, error)
 	SearchUsers(context.Context, string, int32) ([]store.UserDirectoryEntry, error)
+	ClaimFirstAdmin(context.Context, uuid.UUID) (bool, error)
 	CreateAPIToken(context.Context, store.CreateAPITokenInput) (store.APIToken, error)
 	ListAPITokens(context.Context, uuid.UUID) ([]store.APIToken, error)
 	RevokeAPIToken(context.Context, uuid.UUID, uuid.UUID) error
@@ -69,8 +74,9 @@ func New(
 	authorizationClient authorizationv1.AuthorizationServiceClient,
 	identityClient identityv1.IdentityServiceClient,
 	zitiManagementClient zitimanagementv1.ZitiManagementServiceClient,
+	options ...Option,
 ) *Server {
-	return NewWithGroups(store, authorizationClient, identityClient, zitiManagementClient, nil)
+	return NewWithGroups(store, authorizationClient, identityClient, zitiManagementClient, nil, options...)
 }
 
 func NewWithGroups(
@@ -79,14 +85,19 @@ func NewWithGroups(
 	identityClient identityv1.IdentityServiceClient,
 	zitiManagementClient zitiManagementClient,
 	groupsClient groupsClient,
+	options ...Option,
 ) *Server {
-	return &Server{
+	server := &Server{
 		store:                store,
 		authorizationClient:  authorizationClient,
 		identityClient:       identityClient,
 		zitiManagementClient: zitiManagementClient,
 		groupsClient:         groupsClient,
 	}
+	for _, option := range options {
+		option(server)
+	}
+	return server
 }
 
 func identityIDFromContext(ctx context.Context) (uuid.UUID, error) {
@@ -198,6 +209,12 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 			if err != nil {
 				_ = s.store.DeleteUser(ctx, user.Meta.ID)
 				return nil, status.Errorf(codes.Internal, "register identity: %v", err)
+			}
+			if err := s.claimFirstAdmin(ctx, user, req.GetEmailVerified()); err != nil {
+				// The user is provisioned either way. Reporting the failure is
+				// what tells an operator their cluster has no admin, since the
+				// claim stays taken and no later sign-in will grant one.
+				return nil, status.Errorf(codes.Internal, "%v", err)
 			}
 		}
 		return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil

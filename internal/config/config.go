@@ -16,6 +16,7 @@ type Config struct {
 	NATSURL                string
 	GroupSyncDurable       string
 	ReconciliationInterval time.Duration
+	FirstAdminEmail        string
 }
 
 func FromEnv() (Config, error) {
@@ -61,5 +62,7 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("GROUP_SYNC_RECONCILIATION_INTERVAL: %w", err)
 	}
 	cfg.ReconciliationInterval = duration
+	// Optional. Unset means the first sign-in takes cluster admin.
+	cfg.FirstAdminEmail = os.Getenv("FIRST_ADMIN_EMAIL")
 	return cfg, nil
 }

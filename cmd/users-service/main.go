@@ -85,6 +85,7 @@ func run() error {
 		identityv1.NewIdentityServiceClient(identityConn),
 		zitimanagementv1.NewZitiManagementServiceClient(zitiConn),
 		groupsv1.NewGroupsServiceClient(groupsConn),
+		server.WithFirstAdminEmail(cfg.FirstAdminEmail),
 	)
 	usersv1.RegisterUsersServiceServer(grpcServer, serverInstance)
 
