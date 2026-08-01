@@ -155,7 +155,6 @@ dev:
     namespace: ${USERS_NAMESPACE}
     labelSelector:
       app.kubernetes.io/name: users
-      app.kubernetes.io/instance: users
     containers:
       users:
         container: users

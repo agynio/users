@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,17 +200,51 @@ func mustMarshal(t *testing.T, message proto.Message) []byte {
 }
 
 type fakeUserStore struct {
-	users        []store.User
-	devices      map[uuid.UUID][]store.Device
-	createDevice store.Device
+	mu              sync.Mutex
+	users           []store.User
+	devices         map[uuid.UUID][]store.Device
+	createDevice    store.Device
+	firstAdminClaim *uuid.UUID
 }
 
 func newFakeUserStore() *fakeUserStore {
 	return &fakeUserStore{devices: map[uuid.UUID][]store.Device{}}
 }
 
-func (s *fakeUserStore) ResolveOrCreateUser(context.Context, store.UserInput) (store.User, bool, error) {
-	panic("unexpected ResolveOrCreateUser")
+func (s *fakeUserStore) ResolveOrCreateUser(_ context.Context, input store.UserInput) (store.User, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, user := range s.users {
+		if user.OIDCSubject == input.OIDCSubject {
+			return user, false, nil
+		}
+		if input.Username != "" && user.Username == input.Username {
+			return store.User{}, false, store.AlreadyExists("username")
+		}
+	}
+	user := store.User{
+		Meta:        store.EntityMeta{ID: uuid.New()},
+		OIDCSubject: input.OIDCSubject,
+		Name:        input.Name,
+		Email:       input.Email,
+		Nickname:    input.Nickname,
+		Username:    input.Username,
+		PhotoURL:    input.PhotoURL,
+	}
+	s.users = append(s.users, user)
+	return user, true, nil
+}
+
+// ClaimFirstAdmin stands in for the single-row primary key: whoever inserts
+// first takes the claim, and nothing reopens it.
+func (s *fakeUserStore) ClaimFirstAdmin(_ context.Context, identityID uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.firstAdminClaim != nil {
+		return false, nil
+	}
+	s.firstAdminClaim = &identityID
+	return true, nil
 }
 
 func (s *fakeUserStore) CreateUser(context.Context, store.UserInput) (store.User, error) {
@@ -232,8 +267,16 @@ func (s *fakeUserStore) UpdateUser(context.Context, uuid.UUID, store.UserUpdate)
 	panic("unexpected UpdateUser")
 }
 
-func (s *fakeUserStore) DeleteUser(context.Context, uuid.UUID) error {
-	panic("unexpected DeleteUser")
+func (s *fakeUserStore) DeleteUser(_ context.Context, identityID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index, user := range s.users {
+		if user.Meta.ID == identityID {
+			s.users = append(s.users[:index], s.users[index+1:]...)
+			return nil
+		}
+	}
+	return store.NotFound("user")
 }
 
 func (s *fakeUserStore) ListUsers(_ context.Context, pageSize int32, cursor *store.PageCursor) (store.UserListResult, error) {
@@ -315,15 +358,55 @@ func (s *fakeUserStore) DeleteDevice(context.Context, uuid.UUID, uuid.UUID) (sto
 
 type fakeAuthorizationClient struct {
 	authorizationv1.UnimplementedAuthorizationServiceServer
-	objects []string
+	mu       sync.Mutex
+	objects  []string
+	writes   []*authorizationv1.WriteRequest
+	writeErr error
 }
 
 func (c *fakeAuthorizationClient) Check(context.Context, *authorizationv1.CheckRequest, ...grpc.CallOption) (*authorizationv1.CheckResponse, error) {
 	return &authorizationv1.CheckResponse{Allowed: true}, nil
 }
 
-func (c *fakeAuthorizationClient) Write(context.Context, *authorizationv1.WriteRequest, ...grpc.CallOption) (*authorizationv1.WriteResponse, error) {
+func (c *fakeAuthorizationClient) Write(_ context.Context, request *authorizationv1.WriteRequest, _ ...grpc.CallOption) (*authorizationv1.WriteResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return nil, c.writeErr
+	}
+	c.writes = append(c.writes, proto.Clone(request).(*authorizationv1.WriteRequest))
 	return &authorizationv1.WriteResponse{}, nil
+}
+
+// clusterAdmins replays the recorded tuple writes into the set of identities
+// that currently hold cluster admin.
+func (c *fakeAuthorizationClient) clusterAdmins() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	admins := []string{}
+	for _, request := range c.writes {
+		for _, tuple := range request.GetWrites() {
+			if isClusterAdminTuple(tuple) {
+				admins = append(admins, tuple.GetUser())
+			}
+		}
+		for _, tuple := range request.GetDeletes() {
+			if !isClusterAdminTuple(tuple) {
+				continue
+			}
+			for index, admin := range admins {
+				if admin == tuple.GetUser() {
+					admins = append(admins[:index], admins[index+1:]...)
+					break
+				}
+			}
+		}
+	}
+	return admins
+}
+
+func isClusterAdminTuple(tuple *authorizationv1.TupleKey) bool {
+	return tuple.GetRelation() == adminRelation && tuple.GetObject() == clusterObject
 }
 
 func (c *fakeAuthorizationClient) ListObjects(context.Context, *authorizationv1.ListObjectsRequest, ...grpc.CallOption) (*authorizationv1.ListObjectsResponse, error) {

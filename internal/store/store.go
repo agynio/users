@@ -468,6 +468,21 @@ func escapeLikePattern(value string) string {
 	return replacer.Replace(value)
 }
 
+// ClaimFirstAdmin takes the one-shot first-admin claim for identityID and
+// reports whether this caller took it. The primary key admits a single row, so
+// concurrent claimants serialize on it and exactly one insert survives — the
+// losers block until the winner commits and then affect no rows.
+func (s *Store) ClaimFirstAdmin(ctx context.Context, identityID uuid.UUID) (bool, error) {
+	result, err := s.pool.Exec(ctx,
+		`INSERT INTO first_admin_claim (identity_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+		identityID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
+}
+
 func (s *Store) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (APIToken, error) {
 	row := s.pool.QueryRow(ctx,
 		fmt.Sprintf(`INSERT INTO user_api_tokens (identity_id, name, token_hash, token_prefix, expires_at)
