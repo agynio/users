@@ -91,10 +91,6 @@ env:
     value: "users-group-sync"
   - name: GROUP_SYNC_RECONCILIATION_INTERVAL
     value: "60s"
-  # Restricts the one-shot first-admin claim to this verified email address.
-  # Empty lets the first sign-in take it.
-  - name: FIRST_ADMIN_EMAIL
-    value: ""
 envFrom: []
 extraEnvVars: []
 extraEnvVarsCM: ""
