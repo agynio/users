@@ -200,11 +200,10 @@ func mustMarshal(t *testing.T, message proto.Message) []byte {
 }
 
 type fakeUserStore struct {
-	mu              sync.Mutex
-	users           []store.User
-	devices         map[uuid.UUID][]store.Device
-	createDevice    store.Device
-	firstAdminClaim *uuid.UUID
+	mu           sync.Mutex
+	users        []store.User
+	devices      map[uuid.UUID][]store.Device
+	createDevice store.Device
 }
 
 func newFakeUserStore() *fakeUserStore {
@@ -233,18 +232,6 @@ func (s *fakeUserStore) ResolveOrCreateUser(_ context.Context, input store.UserI
 	}
 	s.users = append(s.users, user)
 	return user, true, nil
-}
-
-// ClaimFirstAdmin stands in for the single-row primary key: whoever inserts
-// first takes the claim, and nothing reopens it.
-func (s *fakeUserStore) ClaimFirstAdmin(_ context.Context, identityID uuid.UUID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.firstAdminClaim != nil {
-		return false, nil
-	}
-	s.firstAdminClaim = &identityID
-	return true, nil
 }
 
 func (s *fakeUserStore) CreateUser(context.Context, store.UserInput) (store.User, error) {

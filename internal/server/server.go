@@ -33,7 +33,6 @@ type Server struct {
 	identityClient       identityv1.IdentityServiceClient
 	zitiManagementClient zitiManagementClient
 	groupsClient         groupsClient
-	firstAdminEmail      string
 }
 
 // Option adjusts optional Server behavior at construction.
@@ -49,7 +48,6 @@ type userStore interface {
 	DeleteUser(context.Context, uuid.UUID) error
 	ListUsers(context.Context, int32, *store.PageCursor) (store.UserListResult, error)
 	SearchUsers(context.Context, string, int32) ([]store.UserDirectoryEntry, error)
-	ClaimFirstAdmin(context.Context, uuid.UUID) (bool, error)
 	CreateAPIToken(context.Context, store.CreateAPITokenInput) (store.APIToken, error)
 	ListAPITokens(context.Context, uuid.UUID) ([]store.APIToken, error)
 	RevokeAPIToken(context.Context, uuid.UUID, uuid.UUID) error
@@ -209,12 +207,6 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 			if err != nil {
 				_ = s.store.DeleteUser(ctx, user.Meta.ID)
 				return nil, status.Errorf(codes.Internal, "register identity: %v", err)
-			}
-			if err := s.claimFirstAdmin(ctx, user, req.GetEmailVerified()); err != nil {
-				// The user is provisioned either way. Reporting the failure is
-				// what tells an operator their cluster has no admin, since the
-				// claim stays taken and no later sign-in will grant one.
-				return nil, status.Errorf(codes.Internal, "%v", err)
 			}
 		}
 		return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
