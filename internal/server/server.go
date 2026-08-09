@@ -166,6 +166,13 @@ func (s *Server) syncClusterRole(ctx context.Context, identityID uuid.UUID, role
 		return fmt.Errorf("unsupported cluster role: %s", role.String())
 	}
 	_, err := s.authorizationClient.Write(ctx, request)
+	// The role already being what was asked for is convergence, not failure:
+	// this runs on every sign-in and from the declared administrators, so both
+	// reach a user who already holds it.
+	switch status.Code(err) {
+	case codes.AlreadyExists, codes.NotFound:
+		return nil
+	}
 	return err
 }
 
