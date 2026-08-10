@@ -7,7 +7,11 @@ vars:
 functions:
   patch_deployment: |-
     echo "Patching users deployment for DevSpace..."
-    kubectl patch deployment users-users -n ${USERS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
+    # Its own release names the deployment users-users, the umbrella names it
+    # users. Look it up by label rather than guessing.
+    USERS_DEPLOYMENT="$(kubectl get deployment -n ${USERS_NAMESPACE} \
+      -l app.kubernetes.io/name=users -o jsonpath='{.items[0].metadata.name}')"
+    kubectl patch deployment "${USERS_DEPLOYMENT}" -n ${USERS_NAMESPACE} --type strategic --patch "$(cat <<'EOF'
     spec:
       template:
         spec:
@@ -32,7 +36,16 @@ functions:
                     sleep 1; elapsed=$((elapsed + 1))
                     [ "$elapsed" -ge 120 ] && { echo "ERROR: sync timeout" >&2; exit 1; }
                   done
-                  buf generate buf.build/agynio/api --path agynio/api/users/v1 --path agynio/api/authorization/v1 --path agynio/api/identity/v1 --path agynio/api/ziti_management/v1
+                  # .gen survives restarts in the synced volume; regenerating on every
+                  # crash-loop restart rate-limits us out of the BSR. The marker keys
+                  # on the command, not the module, so delete the pod after an api
+                  # publish to pick up new protos.
+                  GEN="buf generate buf.build/agynio/api --path agynio/api/users/v1 --path agynio/api/authorization/v1 --path agynio/api/identity/v1 --path agynio/api/ziti_management/v1 --path agynio/api/groups/v1"
+                  if [ "$(cat .gen/.gen-cmd 2>/dev/null)" != "$GEN" ]; then
+                    rm -rf .gen
+                    sh -c "$GEN"
+                    printf '%s' "$GEN" > .gen/.gen-cmd
+                  fi
                   exec go run ./cmd/users-service
               volumeMounts:
                 - name: data
@@ -56,6 +69,11 @@ functions:
                   type: RuntimeDefault
     EOF
     )"
+    # go run recompiles on every restart; the probes would kill the pod before
+    # the first build finishes. Nulling through a strategic merge tolerates
+    # them already being absent, so the patch stays re-runnable.
+    kubectl patch deployment "${USERS_DEPLOYMENT}" -n ${USERS_NAMESPACE} --type strategic --patch \
+      '{"spec":{"template":{"spec":{"containers":[{"name":"users","livenessProbe":null,"readinessProbe":null}]}}}}'
 
 deployments:
   e2e-runner:
@@ -74,8 +92,8 @@ deployments:
           app.kubernetes.io/name: users-e2e
 
 commands:
-  test:e2e: |-
-    devspace run-pipeline test:e2e $@
+  test-e2e: |-
+    devspace run-pipeline test-e2e $@
 
 pipelines:
   dev:
@@ -106,7 +124,7 @@ pipelines:
         stop_dev users
       fi
 
-  test:e2e:
+  test-e2e:
     run: |-
       create_deployments e2e-runner
       start_dev e2e-runner &
@@ -114,7 +132,7 @@ pipelines:
       exec_container \
         --label-selector "app.kubernetes.io/name=users-e2e" \
         -n ${USERS_NAMESPACE} \
-        -- bash -c 'cd /opt/app/data && buf generate buf.build/agynio/api --path agynio/api/users/v1 --path agynio/api/authorization/v1 --path agynio/api/identity/v1 --path agynio/api/ziti_management/v1 && go test -v -count=1 -tags e2e ./test/e2e/'
+        -- bash -c 'cd /opt/app/data && buf generate buf.build/agynio/api --path agynio/api/users/v1 --path agynio/api/authorization/v1 --path agynio/api/identity/v1 --path agynio/api/ziti_management/v1 --path agynio/api/groups/v1 && go test -v -count=1 -tags e2e ./test/e2e/'
       EXIT_CODE=$?
       stop_dev e2e-runner
       purge_deployments e2e-runner
@@ -150,8 +168,6 @@ dev:
         logs:
           enabled: true
           lastLines: 200
-    ports:
-      - port: "50051"
 
   e2e-runner:
     namespace: ${USERS_NAMESPACE}

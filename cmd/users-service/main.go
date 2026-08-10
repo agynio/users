@@ -90,6 +90,7 @@ func run() error {
 
 	serverInstance.StartGroupMembershipConsumerLoop(ctx, cfg.NATSURL, cfg.GroupSyncDurable)
 	serverInstance.StartGroupRoleReconciliation(ctx, cfg.ReconciliationInterval)
+	serverInstance.StartDeviceLivenessPolling(ctx, cfg.DeviceLivenessInterval)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
