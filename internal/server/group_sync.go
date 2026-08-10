@@ -11,8 +11,14 @@ import (
 	zitimanagementv1 "github.com/agynio/users/.gen/go/agynio/api/ziti_management/v1"
 	"github.com/agynio/users/internal/store"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
+
+// identityMetadataKey names the caller on a request. gRPC does not carry
+// incoming metadata onto outgoing calls, so a service that dials another on
+// behalf of someone has to say who that is.
+const identityMetadataKey = "x-identity-id"
 
 const (
 	groupMembershipAddedSubject   = "agyn.groups.membership.added"
@@ -54,6 +60,12 @@ func (s *Server) listUserGroups(ctx context.Context, userID uuid.UUID) ([]*group
 	if err != nil {
 		return nil, err
 	}
+	// Named as the user whose groups these are. Groups lets a caller read its
+	// own memberships outright and asks for organization membership otherwise,
+	// so this is both what the request means and the only identity the caller
+	// always has: reconciliation runs on a timer with no request behind it.
+	ctx = metadata.AppendToOutgoingContext(ctx, identityMetadataKey, userID.String())
+
 	groups := []*groupsv1.Group{}
 	for _, organizationID := range organizationIDs {
 		pageToken := ""
