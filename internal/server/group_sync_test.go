@@ -179,6 +179,34 @@ func TestListUserGroupsPaginatesOrganizationsAndGroups(t *testing.T) {
 	require.Equal(t, "page-1", groups.requests[1].GetPageToken())
 }
 
+// Groups answers Unauthenticated without a caller, and gRPC does not carry a
+// server's incoming metadata onto the calls it makes. Reconciliation runs on a
+// timer with no request behind it at all, so naming the user is the only thing
+// that works on both paths -- and Groups lets a caller read its own
+// memberships, which is exactly what this is.
+func TestUserGroupRoleAttributesNamesTheUserToGroups(t *testing.T) {
+	userID := uuid.New()
+	orgID := uuid.New()
+	groupID := uuid.New().String()
+
+	groups := &fakeGroupsClient{groupsByOrg: map[string][]*groupsv1.Group{
+		orgID.String(): {{Meta: &groupsv1.EntityMeta{Id: groupID}}},
+	}}
+	server := NewWithGroups(
+		newFakeUserStore(),
+		&fakeAuthorizationClient{objects: []string{organizationObjectPrefix + orgID.String()}},
+		&fakeIdentityClient{},
+		&fakeZitiManagementClient{},
+		groups,
+	)
+
+	// Background context: no incoming request, nothing to forward.
+	attrs, err := server.userGroupRoleAttributes(context.Background(), userID)
+	require.NoError(t, err)
+	require.Equal(t, []string{groupRoleAttribute(groupID)}, attrs)
+	require.Equal(t, []string{userID.String()}, groups.callers)
+}
+
 func storeDevice(id uuid.UUID, userID uuid.UUID, name string, zitiIdentityID string) store.Device {
 	jwt := "jwt"
 	return store.Device{
@@ -469,9 +497,19 @@ type fakeGroupsClient struct {
 	groupsByOrg      map[string][]*groupsv1.Group
 	pagedGroupsByOrg map[string][][]*groupsv1.Group
 	requests         []*groupsv1.ListMemberGroupsRequest
+	// Groups reads the caller off the outgoing metadata, so a fake that only
+	// records the request cannot tell an authorized call from a rejected one.
+	callers []string
 }
 
-func (c *fakeGroupsClient) ListMemberGroups(_ context.Context, request *groupsv1.ListMemberGroupsRequest, _ ...grpc.CallOption) (*groupsv1.ListMemberGroupsResponse, error) {
+func (c *fakeGroupsClient) ListMemberGroups(ctx context.Context, request *groupsv1.ListMemberGroupsRequest, _ ...grpc.CallOption) (*groupsv1.ListMemberGroupsResponse, error) {
+	caller := ""
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		if values := md.Get("x-identity-id"); len(values) > 0 {
+			caller = values[0]
+		}
+	}
+	c.callers = append(c.callers, caller)
 	c.requests = append(c.requests, proto.Clone(request).(*groupsv1.ListMemberGroupsRequest))
 	if c.pagedGroupsByOrg != nil {
 		pages := c.pagedGroupsByOrg[request.GetOrganizationId()]
