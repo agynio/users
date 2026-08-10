@@ -216,6 +216,7 @@ func storeDevice(id uuid.UUID, userID uuid.UUID, name string, zitiIdentityID str
 		OpenZitiIdentityID: zitiIdentityID,
 		EnrollmentJWT:      &jwt,
 		Status:             store.DeviceStatusPending,
+		Connectivity:       store.DeviceConnectivityOffline,
 		CreatedAt:          time.Unix(1, 0),
 	}
 }
@@ -228,10 +229,11 @@ func mustMarshal(t *testing.T, message proto.Message) []byte {
 }
 
 type fakeUserStore struct {
-	mu           sync.Mutex
-	users        []store.User
-	devices      map[uuid.UUID][]store.Device
-	createDevice store.Device
+	mu              sync.Mutex
+	users           []store.User
+	devices         map[uuid.UUID][]store.Device
+	createDevice    store.Device
+	livenessUpdates []store.UpdateDeviceLivenessInput
 }
 
 func newFakeUserStore() *fakeUserStore {
@@ -371,6 +373,24 @@ func (s *fakeUserStore) DeleteDevice(context.Context, uuid.UUID, uuid.UUID) (sto
 	panic("unexpected DeleteDevice")
 }
 
+func (s *fakeUserStore) UpdateDeviceLiveness(_ context.Context, input store.UpdateDeviceLivenessInput) (store.Device, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.livenessUpdates = append(s.livenessUpdates, input)
+	for identityID, devices := range s.devices {
+		for index, device := range devices {
+			if device.ID == input.ID {
+				s.devices[identityID][index].Status = input.Status
+				s.devices[identityID][index].Connectivity = input.Connectivity
+				s.devices[identityID][index].EnrolledAt = input.EnrolledAt
+				s.devices[identityID][index].LastSeenAt = input.LastSeenAt
+				return s.devices[identityID][index], nil
+			}
+		}
+	}
+	return store.Device{}, fmt.Errorf("device %s not found", input.ID)
+}
+
 type fakeAuthorizationClient struct {
 	authorizationv1.UnimplementedAuthorizationServiceServer
 	mu       sync.Mutex
@@ -474,6 +494,23 @@ type fakeZitiManagementClient struct {
 	createResponse *zitimanagementv1.CreateDeviceIdentityResponse
 	createRequest  *zitimanagementv1.CreateDeviceIdentityRequest
 	patchRequests  []*zitimanagementv1.PatchIdentityRoleAttributesRequest
+	livenessByID   map[string]zitimanagementv1.IdentityEnrollmentState
+	onlineByID     map[string]bool
+	livenessErr    error
+}
+
+func (c *fakeZitiManagementClient) GetIdentityLiveness(_ context.Context, request *zitimanagementv1.GetIdentityLivenessRequest, _ ...grpc.CallOption) (*zitimanagementv1.GetIdentityLivenessResponse, error) {
+	if c.livenessErr != nil {
+		return nil, c.livenessErr
+	}
+	state, ok := c.livenessByID[request.GetZitiIdentityId()]
+	if !ok {
+		state = zitimanagementv1.IdentityEnrollmentState_IDENTITY_ENROLLMENT_STATE_PENDING
+	}
+	return &zitimanagementv1.GetIdentityLivenessResponse{
+		EnrollmentState:         state,
+		HasEdgeRouterConnection: c.onlineByID[request.GetZitiIdentityId()],
+	}, nil
 }
 
 func (c *fakeZitiManagementClient) CreateDeviceIdentity(_ context.Context, request *zitimanagementv1.CreateDeviceIdentityRequest, _ ...grpc.CallOption) (*zitimanagementv1.CreateDeviceIdentityResponse, error) {

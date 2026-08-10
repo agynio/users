@@ -17,7 +17,7 @@ import (
 const (
 	userColumns     = `identity_id, oidc_subject, name, email, nickname, username, photo_url, created_at, updated_at`
 	apiTokenColumns = `id, identity_id, name, token_hash, token_prefix, expires_at, created_at, last_used_at`
-	deviceColumns   = `id, identity_id, name, openziti_identity_id, enrollment_jwt, status, created_at`
+	deviceColumns   = `id, identity_id, name, openziti_identity_id, enrollment_jwt, status, connectivity, enrolled_at, last_seen_at, created_at`
 )
 
 type EntityMeta struct {
@@ -78,9 +78,14 @@ type APIToken struct {
 
 type DeviceStatus string
 
+type DeviceConnectivity string
+
 const (
 	DeviceStatusPending  DeviceStatus = "pending"
 	DeviceStatusEnrolled DeviceStatus = "enrolled"
+
+	DeviceConnectivityOnline  DeviceConnectivity = "online"
+	DeviceConnectivityOffline DeviceConnectivity = "offline"
 )
 
 type CreateAPITokenInput struct {
@@ -98,7 +103,18 @@ type Device struct {
 	OpenZitiIdentityID string
 	EnrollmentJWT      *string
 	Status             DeviceStatus
+	Connectivity       DeviceConnectivity
+	EnrolledAt         *time.Time
+	LastSeenAt         *time.Time
 	CreatedAt          time.Time
+}
+
+type UpdateDeviceLivenessInput struct {
+	ID           uuid.UUID
+	Status       DeviceStatus
+	Connectivity DeviceConnectivity
+	EnrolledAt   *time.Time
+	LastSeenAt   *time.Time
 }
 
 type CreateDeviceInput struct {
@@ -187,6 +203,9 @@ func scanDevice(row pgx.Row) (Device, error) {
 	var device Device
 	var enrollmentJWT pgtype.Text
 	var status string
+	var connectivity string
+	var enrolledAt pgtype.Timestamptz
+	var lastSeenAt pgtype.Timestamptz
 	if err := row.Scan(
 		&device.ID,
 		&device.IdentityID,
@@ -194,6 +213,9 @@ func scanDevice(row pgx.Row) (Device, error) {
 		&device.OpenZitiIdentityID,
 		&enrollmentJWT,
 		&status,
+		&connectivity,
+		&enrolledAt,
+		&lastSeenAt,
 		&device.CreatedAt,
 	); err != nil {
 		return Device{}, err
@@ -202,12 +224,27 @@ func scanDevice(row pgx.Row) (Device, error) {
 		value := enrollmentJWT.String
 		device.EnrollmentJWT = &value
 	}
+	if enrolledAt.Valid {
+		value := enrolledAt.Time
+		device.EnrolledAt = &value
+	}
+	if lastSeenAt.Valid {
+		value := lastSeenAt.Time
+		device.LastSeenAt = &value
+	}
 	deviceStatus := DeviceStatus(status)
 	switch deviceStatus {
 	case DeviceStatusPending, DeviceStatusEnrolled:
 		device.Status = deviceStatus
 	default:
 		return Device{}, fmt.Errorf("unsupported device status %q", status)
+	}
+	deviceConnectivity := DeviceConnectivity(connectivity)
+	switch deviceConnectivity {
+	case DeviceConnectivityOnline, DeviceConnectivityOffline:
+		device.Connectivity = deviceConnectivity
+	default:
+		return Device{}, fmt.Errorf("unsupported device connectivity %q", connectivity)
 	}
 	return device, nil
 }
@@ -566,6 +603,22 @@ func (s *Store) CreateDevice(ctx context.Context, input CreateDeviceInput) (Devi
 		input.OpenZitiIdentityID,
 		input.EnrollmentJWT,
 		DeviceStatusPending,
+	)
+	device, err := scanDevice(row)
+	if err != nil {
+		return Device{}, err
+	}
+	return device, nil
+}
+
+func (s *Store) UpdateDeviceLiveness(ctx context.Context, input UpdateDeviceLivenessInput) (Device, error) {
+	row := s.pool.QueryRow(ctx,
+		fmt.Sprintf(`UPDATE user_devices SET status = $1, connectivity = $2, enrolled_at = $3, last_seen_at = $4 WHERE id = $5 RETURNING %s`, deviceColumns),
+		input.Status,
+		input.Connectivity,
+		input.EnrolledAt,
+		input.LastSeenAt,
+		input.ID,
 	)
 	device, err := scanDevice(row)
 	if err != nil {

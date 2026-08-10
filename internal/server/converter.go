@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	usersv1 "github.com/agynio/users/.gen/go/agynio/api/users/v1"
 	"github.com/agynio/users/internal/store"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -57,6 +59,27 @@ func toProtoDevice(device store.Device) *usersv1.Device {
 		Name:               device.Name,
 		OpenzitiIdentityId: device.OpenZitiIdentityID,
 		Status:             toProtoDeviceStatus(device.Status),
+		Connectivity:       toProtoDeviceConnectivity(device.Connectivity),
+		EnrolledAt:         optionalTimestamp(device.EnrolledAt),
+		LastSeenAt:         optionalTimestamp(device.LastSeenAt),
+	}
+}
+
+func optionalTimestamp(value *time.Time) *timestamppb.Timestamp {
+	if value == nil {
+		return nil
+	}
+	return timestamppb.New(*value)
+}
+
+func toProtoDeviceConnectivity(connectivity store.DeviceConnectivity) usersv1.DeviceConnectivity {
+	switch connectivity {
+	case store.DeviceConnectivityOnline:
+		return usersv1.DeviceConnectivity_DEVICE_CONNECTIVITY_ONLINE
+	case store.DeviceConnectivityOffline:
+		return usersv1.DeviceConnectivity_DEVICE_CONNECTIVITY_OFFLINE
+	default:
+		panic("unsupported device connectivity: " + string(connectivity))
 	}
 }
 

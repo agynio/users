@@ -55,12 +55,14 @@ type userStore interface {
 	CreateDevice(context.Context, store.CreateDeviceInput) (store.Device, error)
 	ListDevices(context.Context, uuid.UUID, int32, *store.PageCursor) (store.DeviceListResult, error)
 	DeleteDevice(context.Context, uuid.UUID, uuid.UUID) (store.Device, error)
+	UpdateDeviceLiveness(context.Context, store.UpdateDeviceLivenessInput) (store.Device, error)
 }
 
 type zitiManagementClient interface {
 	CreateDeviceIdentity(context.Context, *zitimanagementv1.CreateDeviceIdentityRequest, ...grpc.CallOption) (*zitimanagementv1.CreateDeviceIdentityResponse, error)
 	DeleteDeviceIdentity(context.Context, *zitimanagementv1.DeleteDeviceIdentityRequest, ...grpc.CallOption) (*zitimanagementv1.DeleteDeviceIdentityResponse, error)
 	PatchIdentityRoleAttributes(context.Context, *zitimanagementv1.PatchIdentityRoleAttributesRequest, ...grpc.CallOption) (*zitimanagementv1.PatchIdentityRoleAttributesResponse, error)
+	GetIdentityLiveness(context.Context, *zitimanagementv1.GetIdentityLivenessRequest, ...grpc.CallOption) (*zitimanagementv1.GetIdentityLivenessResponse, error)
 }
 
 type groupsClient interface {

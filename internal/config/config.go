@@ -16,6 +16,7 @@ type Config struct {
 	NATSURL                string
 	GroupSyncDurable       string
 	ReconciliationInterval time.Duration
+	DeviceLivenessInterval time.Duration
 }
 
 func FromEnv() (Config, error) {
@@ -61,6 +62,14 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("GROUP_SYNC_RECONCILIATION_INTERVAL: %w", err)
 	}
 	cfg.ReconciliationInterval = duration
+	deviceLivenessInterval := os.Getenv("DEVICE_LIVENESS_INTERVAL")
+	if deviceLivenessInterval == "" {
+		deviceLivenessInterval = "30s"
+	}
+	cfg.DeviceLivenessInterval, err = time.ParseDuration(deviceLivenessInterval)
+	if err != nil {
+		return Config{}, fmt.Errorf("DEVICE_LIVENESS_INTERVAL: %w", err)
+	}
 	// Optional. Unset means the first sign-in takes cluster admin.
 	return cfg, nil
 }
