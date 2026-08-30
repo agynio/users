@@ -1,7 +1,7 @@
 version: v2beta1
 
 vars:
-  USERS_NAMESPACE: platform
+  USERS_NAMESPACE: agyn-platform
   E2E_IMAGE: ghcr.io/agynio/devcontainer-go:1
 
 functions:

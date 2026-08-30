@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	authorizationv1 "github.com/agynio/users/.gen/go/agynio/api/authorization/v1"
@@ -208,15 +209,22 @@ func (s *Server) ResolveOrCreateUser(ctx context.Context, req *usersv1.ResolveOr
 			}
 			return nil, toStatusError(err)
 		}
-		if created {
-			_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
-				IdentityId:   user.Meta.ID.String(),
-				IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER,
-			})
-			if err != nil {
+		// Registered on every resolve, not only on create: a user seeded before
+		// this call existed carries no identity row, and nothing else would ever
+		// write one. Without it GetIdentityType answers NotFound, which
+		// CreateOrganization reads as "not a person" and silently makes an
+		// organization its owner cannot see.
+		_, err = s.identityClient.RegisterIdentity(ctx, &identityv1.RegisterIdentityRequest{
+			IdentityId:   user.Meta.ID.String(),
+			IdentityType: identityv1.IdentityType_IDENTITY_TYPE_USER,
+		})
+		if err != nil && status.Code(err) != codes.AlreadyExists {
+			if created {
 				_ = s.store.DeleteUser(ctx, user.Meta.ID)
 				return nil, status.Errorf(codes.Internal, "register identity: %v", err)
 			}
+			// The user already exists and signing in still has to work.
+			log.Printf("register identity for existing user %s failed: %v", user.Meta.ID, err)
 		}
 		return &usersv1.ResolveOrCreateUserResponse{User: toProtoUser(user), Created: created}, nil
 	}
